@@ -1082,7 +1082,20 @@ async def chat_websocket(websocket: WebSocket):
 
 
 async def _generate_and_stream(websocket: WebSocket, user_input: str):
-    prompt = f"{config.USER_NAME}: {user_input}\n{config.BOT_NAME}:"
+    # Build prompt using the last few turns of history so the model has
+    # conversational context even though RWKV state carries long-term memory.
+    # G1 World models are trained on "User: ...\n\nAssistant: ..." format.
+    history_turns = []
+    if state.db:
+        rows = state.db.get_recent_messages(limit=6)
+        for r in rows:
+            role_label = config.USER_NAME if r["role"] == "user" else config.BOT_NAME
+            history_turns.append(f"{role_label}: {r['content']}")
+    history_block = "\n\n".join(history_turns)
+    if history_block:
+        prompt = f"{history_block}\n\n{config.USER_NAME}: {user_input}\n\n{config.BOT_NAME}:"
+    else:
+        prompt = f"{config.USER_NAME}: {user_input}\n\n{config.BOT_NAME}:"
     await websocket.send_text(json.dumps({"type": "start", "timestamp": datetime.now().isoformat()}))
 
     token_queue: queue.Queue = queue.Queue()
