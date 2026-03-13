@@ -7,6 +7,22 @@
 
 set -euo pipefail
 
+# When piped through curl, BASH_SOURCE[0] is empty or unset.
+# Detect this and require the user to clone first.
+if [[ -z "${BASH_SOURCE[0]:-}" ]] || [[ "${BASH_SOURCE[0]}" == "bash" ]]; then
+    echo ""
+    echo "Flint — installer"
+    echo "────────────────────────────────────────────"
+    echo ""
+    echo "  Please clone the repository before running install.sh:"
+    echo ""
+    echo "    git clone https://github.com/Roronshi/flint"
+    echo "    cd flint"
+    echo "    bash install.sh"
+    echo ""
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 UPDATE_MODE=false
