@@ -257,16 +257,37 @@ else
         info "Official G1 models: https://huggingface.co/BlinkDL/rwkv7-g1"
     elif [[ -n "${MODEL_SIZES[$MODEL_CHOICE]:-}" ]]; then
         CHOSEN_SIZE="${MODEL_SIZES[$MODEL_CHOICE]}"
+
+        # ── HuggingFace token (optional but recommended) ──────────────────────
+        echo ""
+        echo "  ${BOLD}HuggingFace token${RESET} ${DIM}(optional)${RESET}"
+        echo "  ${DIM}A free token gives faster, authenticated downloads and avoids throttling.${RESET}"
+        echo "  ${DIM}Get one at: huggingface.co → Settings → Access Tokens → New token (Read)${RESET}"
+        echo "  ${DIM}Leave blank to download without a token (slower).${RESET}"
+        echo ""
+        read -r -p "  HF token [leave blank to skip]: " HF_TOKEN_INPUT
+        if [[ -n "$HF_TOKEN_INPUT" ]]; then
+            export HF_TOKEN="$HF_TOKEN_INPUT"
+            ok "Token set for this session"
+        else
+            info "Continuing without token — download may be slower."
+        fi
+
         echo ""
         info "Downloading RWKV-7 G1 ${CHOSEN_SIZE} from Hugging Face…"
-        info "This may take a while. The file lands in models/."
+        info "Downloads are resumable — if interrupted, re-run install.sh to continue."
         echo ""
-        # Download only the file(s) matching the chosen size string.
+
+        TOKEN_ARG=""
+        [[ -n "${HF_TOKEN_INPUT:-}" ]] && TOKEN_ARG="--token $HF_TOKEN_INPUT"
+
+        # Download only the latest file matching the chosen size.
         "$PYTHON_VENV" "$SCRIPT_DIR/scripts/download_models.py" \
             --repo BlinkDL/rwkv7-g1 \
             --dest "$SCRIPT_DIR/models" \
             --pattern .pth .onnx \
-            --size "$CHOSEN_SIZE" || true
+            --size "$CHOSEN_SIZE" \
+            ${TOKEN_ARG} || true
         # After download, pick the first file matching the chosen size string.
         MODEL_DEST="$(ls "$SCRIPT_DIR"/models/*${CHOSEN_SIZE}*.pth 2>/dev/null | head -1 || true)"
         if [[ -n "$MODEL_DEST" ]]; then
