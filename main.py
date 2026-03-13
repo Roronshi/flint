@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# main.py — Entry point for RWKV Companion (terminal UI)
+# main.py — Entry point for Flint (terminal UI)
 #
 # For the web UI, run:
 #   uvicorn web.server:app --host 0.0.0.0 --port 8000
