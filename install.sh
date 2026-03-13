@@ -140,8 +140,8 @@ info "Core packages…"
     onnxruntime
 ok "fastapi, uvicorn, rwkv, onnxruntime, huggingface-hub"
 
-info "PyTorch ($(basename $TORCH_INDEX))…"
-"$PIP" install --quiet torch --index-url "$TORCH_INDEX"
+info "PyTorch ($(basename $TORCH_INDEX)) — this may take a few minutes…"
+"$PIP" install --progress-bar on torch --index-url "$TORCH_INDEX"
 ok "torch"
 
 # ── 5. RWKV-PEFT (LoRA training — optional) ──────────────────────────────────
@@ -151,8 +151,7 @@ if command -v git &>/dev/null; then
     if [[ ! -d "$SCRIPT_DIR/RWKV-PEFT" ]]; then
         info "Cloning…"
         git clone --quiet https://github.com/Joluck/RWKV-PEFT "$SCRIPT_DIR/RWKV-PEFT"
-        "$PIP" install --quiet -e "$SCRIPT_DIR/RWKV-PEFT/"
-        ok "RWKV-PEFT installed  (Joluck/RWKV-PEFT — RWKV7 LoRA support)"
+        ok "RWKV-PEFT cloned  (Joluck/RWKV-PEFT — RWKV7 LoRA support)"
     else
         ok "RWKV-PEFT already present"
     fi
