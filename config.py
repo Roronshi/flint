@@ -25,7 +25,7 @@ SYSTEM_PROMPT = (
     "You are {BOT_NAME}, a personal companion for {USER_NAME}. "
     "You are curious, thoughtful, and direct. You remember our previous "
     "conversations through your internal state. You develop gradually and "
-    "are shaped by our shared history."
+    "are shaped by our shared history.\n\n"
 )
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -59,7 +59,9 @@ ALPHA_PRESENCE  = 0.4     # Repetition penalty (one-time)
 # Stop sequences — generation halts when any of these is produced.
 # This prevents the model from writing the user's next message.
 STOP_SEQUENCES = [
+    f"\n\n{USER_NAME}:",
     f"\n{USER_NAME}:",
+    f"\n\n<{USER_NAME}>",
     f"\n<{USER_NAME}>",
     "\n\nUser:",
     "\n\nHuman:",
@@ -110,7 +112,9 @@ SYSTEM_PROMPT = SYSTEM_PROMPT.format(BOT_NAME=BOT_NAME, USER_NAME=USER_NAME)
 
 # Rebuild stop sequences with final USER_NAME
 STOP_SEQUENCES = [
+    f"\n\n{USER_NAME}:",
     f"\n{USER_NAME}:",
+    f"\n\n<{USER_NAME}>",
     f"\n<{USER_NAME}>",
     "\n\nUser:",
     "\n\nHuman:",
