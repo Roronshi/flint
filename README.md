@@ -11,7 +11,7 @@ Critically, all of this is designed to run on a personal computer. RWKV models a
 This is early and incomplete. The architecture is in place — chat, state persistence, nightly training, conversation import, web UI — but real-world validation against a live model is still ahead. Nothing here is a promise. It's a direction.
 
 ```bash
-git clone https://github.com/Roronshi/flint
+git clone https://github.com/Roronshi/Flint---Persistant-state-companion-AI/
 cd flint
 bash install.sh
 ```
