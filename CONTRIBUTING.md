@@ -1,4 +1,4 @@
-# Contributing to RWKV Companion
+# Contributing to Flint
 
 Thanks for your interest in contributing. This is a focused project — a local, private companion bot built on RWKV. Contributions that serve that purpose are welcome.
 
@@ -13,8 +13,8 @@ A local-first companion with:
 ## Development setup
 
 ```bash
-git clone https://github.com/yourname/rwkv-companion
-cd rwkv-companion
+git clone https://github.com/yourname/flint
+cd flint
 bash install.sh
 cp config.example.py config_local.py
 # Edit config_local.py with your settings
