@@ -39,7 +39,7 @@ State is saved to disk at the end of every session. Next time you open the chat,
 ### 1. Clone
 
 ```bash
-git clone https://github.com/Roronshi/flint
+git clone https://github.com/Roronshi/Flint---Persistant-state-companion-AI/
 cd flint
 ```
 
