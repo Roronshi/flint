@@ -9,8 +9,14 @@ from typing import Callable, Optional
 import config
 from .base_backend import BaseModelBackend
 
+# RWKV-7 G1 models require RWKV_V7_ON=1 to activate the RWKV_x070 codepath
+# in the rwkv pip package.  Set before importing rwkv.model.
+os.environ.setdefault("RWKV_V7_ON", "1")
+os.environ.setdefault("RWKV_JIT_ON", "1")
+os.environ.setdefault("RWKV_CUDA_ON", "0")  # pure-Python fallback; safe on all hardware
+
 try:
-    from rwkv.model import RWKV  # type: ignore
+    from rwkv.model import RWKV_x070 as RWKV  # type: ignore  # RWKV-7 G1 class
     from rwkv.utils import PIPELINE  # type: ignore
 except Exception:  # pragma: no cover
     RWKV = None
@@ -34,30 +40,7 @@ class RWKVBackend(BaseModelBackend):
             raise RuntimeError("rwkv package is not installed")
         self.model = RWKV(model=path, strategy=strategy or "cpu fp32")
         self.pipeline = PIPELINE(self.model, vocab_path)
-        # RWKV-7 G1 requires args.n_head / head_size to be set explicitly;
-        # the pip package does not derive them from weight shapes automatically.
-        # Derive from the r_k weight (shape: n_head x head_size).
-        args = self.model.args
-        if not hasattr(args, "n_head") or args.n_head is None:
-            try:
-                w = self.model.w
-                rk = next(v for k, v in w.items() if k.endswith(".att.r_k"))
-                n_head, head_size = rk.shape
-                args.n_head = n_head
-                args.head_size = head_size
-                if not hasattr(args, "n_att") or args.n_att is None:
-                    args.n_att = n_head * head_size
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Could not auto-derive n_head from model weights: %s. "
-                    "Falling back to n_embd-based guess.", e
-                )
-                n_embd = getattr(args, "n_embd", 2560)
-                args.n_head = n_embd // 64
-                args.head_size = 64
-                if not hasattr(args, "n_att") or args.n_att is None:
-                    args.n_att = n_embd
+        # RWKV_x070 derives n_head/head_size internally from the r_k weight shape.
 
     def generate(
         self,
