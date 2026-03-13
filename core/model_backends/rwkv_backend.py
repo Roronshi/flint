@@ -137,9 +137,13 @@ class RWKVBackend(BaseModelBackend):
     def load_lora(self, path: str) -> bool:
         if not os.path.exists(path) or self.model is None:
             return False
-        try:
-            from rwkv_peft import apply_lora  # type: ignore
-            apply_lora(self.model, path)
-            return True
-        except Exception:
-            return False
+        # RWKV-PEFT is a training-scripts repo and does not expose a Python API
+        # for runtime adapter loading.  LoRA fine-tuning runs as a nightly
+        # subprocess (lora/pipeline.py) and produces updated base weights;
+        # runtime hot-loading is not currently supported.
+        import logging
+        logging.getLogger(__name__).info(
+            "load_lora: runtime LoRA application not supported — "
+            "adapter is applied during nightly training, not at runtime."
+        )
+        return False
