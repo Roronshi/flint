@@ -38,7 +38,9 @@ class RWKVBackend(BaseModelBackend):
     def load(self, path: str, strategy: str | None = None, vocab_path: str | None = None) -> None:
         if RWKV is None or PIPELINE is None:
             raise RuntimeError("rwkv package is not installed")
-        self.model = RWKV(model=path, strategy=strategy or "cpu fp32")
+        # RWKV_x070 appends '.pth' internally — strip it if already present
+        model_path = path[:-4] if path.endswith(".pth") else path
+        self.model = RWKV(model=model_path, strategy=strategy or "cuda fp16")
         self.pipeline = PIPELINE(self.model, vocab_path)
         # RWKV_x070 derives n_head/head_size internally from the r_k weight shape.
 
