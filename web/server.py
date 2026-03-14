@@ -141,6 +141,10 @@ async def lifespan(app: FastAPI):
     state.scheduler = LoRAScheduler(state.db)
     state.scheduler.start()
 
+    # Wire live backend into LoRA scheduler so trainer can access model weights
+    if state.scheduler and state.model and state.model.backend:
+        state.scheduler.set_backend(state.model.backend)
+
     chat_service = ChatService(state)
     reflection_service = ReflectionService(state.db)
     background_scheduler = SchedulerService(state.db)
