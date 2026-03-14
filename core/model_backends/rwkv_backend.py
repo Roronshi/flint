@@ -82,10 +82,18 @@ class RWKVBackend(BaseModelBackend):
             log.info("CUDA memory after offload: %.2f GB allocated", allocated_gb)
 
     def reload_to_gpu(self) -> None:
-        """Reload model from disk back onto GPU after LoRA subprocess completes."""
+        """Reload model from disk back onto GPU after LoRA training completes."""
         if not hasattr(self, "_model_path") or self._model_path is None:
             return
         self.load(self._model_path, self._model_strategy, self._vocab_path)
+        # Move state tensors back to the model's device (they were on CPU during training)
+        if self.state is not None:
+            dev = self._model_device()
+            if dev != "cpu":
+                self.state = [
+                    s.to(dev) if isinstance(s, torch.Tensor) else s
+                    for s in self.state
+                ]
 
     def generate(
         self,
