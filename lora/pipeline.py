@@ -185,7 +185,7 @@ class LoRAPipeline:
                 log.warning(f"Adapter backup failed (continuing): {e}")
 
         cmd = [
-            "python", str(peft_train),
+            "python3", str(peft_train),
             f"--model_path={config.MODEL_PATH}",
             f"--data_file={data_path}",
             f"--lora_r={config.LORA_R}",
