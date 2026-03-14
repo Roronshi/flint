@@ -12,7 +12,7 @@ from .base_backend import BaseModelBackend
 # RWKV-7 G1 models require RWKV_V7_ON=1 to activate the RWKV_x070 codepath
 # in the rwkv pip package.  Set before importing rwkv.model.
 os.environ.setdefault("RWKV_V7_ON", "1")
-os.environ.setdefault("RWKV_JIT_ON", "1")  # JIT on for fast inference
+os.environ["RWKV_JIT_ON"] = "0"  # JIT off — required for in-process LoRA training (.w access)
 os.environ.setdefault("RWKV_CUDA_ON", "0")  # pure-Python fallback; safe on all hardware
 
 try:
