@@ -214,9 +214,10 @@ class RWKVLoRATrainer:
 
     # ── Main training loop ────────────────────────────────────────────────────
 
-    def train(self, segments: List[dict]) -> dict:
+    def train(self, segments: List[dict], progress_callback=None) -> dict:
         """
         Fine-tune on segments (list of {"text": str}).
+        progress_callback(epoch, step, total_steps, loss) called after each step.
         Returns {"loss": float, "steps": int, "elapsed": float}.
         """
         self._inject_adapters()
@@ -243,7 +244,8 @@ class RWKVLoRATrainer:
             import random
             random.shuffle(token_seqs)
             epoch_loss = 0.0
-            for ids in token_seqs:
+            total_seq = len(token_seqs)
+            for step_i, ids in enumerate(token_seqs):
                 optimizer.zero_grad()
                 loss = self._compute_loss(ids)
                 if loss.requires_grad:
@@ -252,6 +254,8 @@ class RWKVLoRATrainer:
                     optimizer.step()
                 epoch_loss += loss.item()
                 steps += 1
+                if progress_callback:
+                    progress_callback(epoch + 1, step_i + 1, total_seq, loss.item())
             avg = epoch_loss / max(len(token_seqs), 1)
             log.info("Epoch %d/%d — avg loss: %.4f", epoch + 1, self.epochs, avg)
             total_loss += epoch_loss
