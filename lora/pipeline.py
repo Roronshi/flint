@@ -168,6 +168,9 @@ class LoRAPipeline:
         """
         project_root = Path(config.BASE_DIR)
         peft_train   = project_root / "RWKV-PEFT" / "train.py"
+        # Use the venv python so RWKV-PEFT gets the same packages as Flint.
+        venv_python  = project_root / ".venv" / "bin" / "python3"
+        python_exe   = str(venv_python) if venv_python.exists() else "python3"
 
         if not peft_train.exists():
             log.error(f"RWKV-PEFT not found: {peft_train}")
@@ -185,7 +188,7 @@ class LoRAPipeline:
                 log.warning(f"Adapter backup failed (continuing): {e}")
 
         cmd = [
-            "python3", str(peft_train),
+            python_exe, str(peft_train),
             f"--model_path={config.MODEL_PATH}",
             f"--data_file={data_path}",
             f"--lora_r={config.LORA_R}",
