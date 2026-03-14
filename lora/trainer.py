@@ -50,22 +50,6 @@ class LoRALinear(nn.Module):
         return {"lora_A": self.lora_A.data, "lora_B": self.lora_B.data}
 
 
-# ── Tokenizer wrapper ─────────────────────────────────────────────────────────
-
-class _Tokenizer:
-    def __init__(self, backend):
-        self._backend = backend
-
-    def encode(self, text: str) -> List[int]:
-        w = self._backend.w
-        if hasattr(w, "tokenizer"):
-            return w.tokenizer.encode(text)
-        # RWKV world tokenizer lives on the model object
-        from rwkv.utils import PIPELINE
-        pipeline = PIPELINE(self._backend.model, "rwkv_vocab_v20230424")
-        return pipeline.encode(text)
-
-
 # ── Trainer ───────────────────────────────────────────────────────────────────
 
 class RWKVLoRATrainer:
@@ -302,7 +286,7 @@ class RWKVLoRATrainer:
 
     def _compute_loss(self, token_ids: List[int]) -> torch.Tensor:
         if len(token_ids) < 2:
-            return torch.tensor(0.0, requires_grad=True, device=self.device)
+            return torch.tensor(0.0, requires_grad=True)  # training always runs on CPU
         logits = self._forward_for_training(token_ids)  # (T, vocab)
         # Predict next token: input[:-1] → target[1:]
         shift_logits = logits[:-1]

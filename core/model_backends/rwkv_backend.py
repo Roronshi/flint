@@ -54,11 +54,16 @@ class RWKVBackend(BaseModelBackend):
         if self.model is None:
             return
         try:
-            # Move all tensors in model.w to CPU
-            if hasattr(self.model, "w"):
-                for k in self.model.w:
-                    if hasattr(self.model.w[k], "to"):
-                        self.model.w[k] = self.model.w[k].cpu()
+            # Move all tensors in model.z (RWKV-7) or model.w (older) to CPU
+            weight_dict = None
+            if hasattr(self.model, "z"):
+                weight_dict = self.model.z
+            elif hasattr(self.model, "w"):
+                weight_dict = self.model.w
+            if weight_dict is not None:
+                for k in weight_dict:
+                    if hasattr(weight_dict[k], "to"):
+                        weight_dict[k] = weight_dict[k].cpu()
             # Also move state to CPU if present
             if self.state is not None:
                 self.state = [s.cpu() if hasattr(s, "cpu") else s for s in self.state]
@@ -175,13 +180,5 @@ class RWKVBackend(BaseModelBackend):
     def load_lora(self, path: str) -> bool:
         if not os.path.exists(path) or self.model is None:
             return False
-        # RWKV-PEFT is a training-scripts repo and does not expose a Python API
-        # for runtime adapter loading.  LoRA fine-tuning runs as a nightly
-        # subprocess (lora/pipeline.py) and produces updated base weights;
-        # runtime hot-loading is not currently supported.
-        import logging
-        logging.getLogger(__name__).info(
-            "load_lora: runtime LoRA application not supported — "
-            "adapter is applied during nightly training, not at runtime."
-        )
-        return False
+        from lora.trainer import RWKVLoRATrainer
+        return RWKVLoRATrainer.load_adapter(self, path)
