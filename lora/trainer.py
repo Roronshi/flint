@@ -108,51 +108,48 @@ class RWKVLoRATrainer:
     def _get_weight_dict(self):
         """
         Return a flat {name: tensor} dict from the model.
-        RWKV_x070 compiles via TorchScript so weights live in
-        named_parameters() / state_dict(), not a .w attribute.
+        RWKV_x070 stores weights in model.w (OrderedDict of tensors).
         """
         model = self.backend.model
-        # TorchScript compiled model (RWKV_x070 with RWKV_JIT_ON=1)
         if hasattr(model, "w"):
-            return dict(model.w)
-        # Fallback: use state_dict (works for both JIT and non-JIT)
-        try:
-            return {k: v for k, v in model.state_dict().items()}
-        except Exception:
-            pass
-        # Last resort: named_parameters
-        return {k: v.data for k, v in model.named_parameters()}
+            return model.w  # direct reference — mutations affect the model
+        raise RuntimeError("Cannot access model weights: model has no .w attribute")
 
     def _inject_adapters(self):
-        """Build LoRALinear adapters for target attention projection weights."""
+        """Build LoRALinear adapters for target attention projection weights.
+        
+        RWKV-7 G1 .pth keys look like:
+            blocks.N.att.receptance.weight  (2560, 2560)
+            blocks.N.att.key.weight
+            blocks.N.att.value.weight
+            blocks.N.att.output.weight
+        """
         weight_dict = self._get_weight_dict()
         self._adapters = {}
-        self._weight_dict = weight_dict  # keep reference for forward patching
+        self._weight_dict = weight_dict  # direct reference to model.w
 
         for key, tensor in weight_dict.items():
             if not isinstance(tensor, torch.Tensor) or tensor.dim() != 2:
                 continue
+            # Key format: blocks.N.att.receptance.weight
             parts = key.split(".")
-            # Match: blocks.N.att.receptance.weight (or without .weight suffix)
-            if len(parts) < 3:
-                continue
-            # Normalise — some dicts include .weight suffix, some don't
-            base = key[:-7] if key.endswith(".weight") else key
-            base_parts = base.split(".")
             if (
-                len(base_parts) >= 4
-                and base_parts[0] == "blocks"
-                and base_parts[2] == "att"
-                and base_parts[3] in self.TARGET_LAYERS
+                len(parts) == 5
+                and parts[0] == "blocks"
+                and parts[2] == "att"
+                and parts[3] in self.TARGET_LAYERS
+                and parts[4] == "weight"
             ):
+                # adapter name = key without .weight suffix
+                name = ".".join(parts[:4])  # blocks.N.att.receptance
                 lora = LoRALinear(
                     tensor.to(self.device),
                     r=self.r,
                     alpha=self.alpha,
                     dropout=self.dropout,
                 ).to(self.device)
-                self._adapters[base] = lora
-                log.debug("Injected LoRA adapter: %s", base)
+                self._adapters[name] = lora
+                log.debug("Injected LoRA adapter: %s", key)
 
         log.info("Injected %d LoRA adapters", len(self._adapters))
 
@@ -166,15 +163,13 @@ class RWKVLoRATrainer:
         model = self.backend.model
         w = self._weight_dict
 
-        # Build merged weights and patch
+        # Build merged weights and patch (keys always have .weight suffix)
         original = {}
         for name, lora in self._adapters.items():
-            # Try both with and without .weight suffix
-            for key in (name + ".weight", name):
-                if key in w:
-                    original[key] = w[key].clone()
-                    w[key] = lora.merged_weight().to(w[key].dtype)
-                    break
+            key = name + ".weight"
+            if key in w:
+                original[key] = w[key].clone()
+                w[key] = lora.merged_weight().to(w[key].dtype)
 
         try:
             tokens = torch.tensor(token_ids, dtype=torch.long).to(self.device)
