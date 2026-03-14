@@ -40,9 +40,38 @@ class RWKVBackend(BaseModelBackend):
             raise RuntimeError("rwkv package is not installed")
         # RWKV_x070 appends '.pth' internally — strip it if already present
         model_path = path[:-4] if path.endswith(".pth") else path
+        self._model_path   = path
+        self._model_strategy = strategy
+        self._vocab_path   = vocab_path
         self.model = RWKV(model=model_path, strategy=strategy or "cuda fp16")
         self.pipeline = PIPELINE(self.model, vocab_path)
         # RWKV_x070 derives n_head/head_size internally from the r_k weight shape.
+
+    def offload_to_cpu(self) -> None:
+        """Move model weights to CPU and free GPU memory. Used before LoRA subprocess."""
+        import gc
+        import torch
+        if self.model is None:
+            return
+        try:
+            # Move all tensors in model.w to CPU
+            if hasattr(self.model, "w"):
+                for k in self.model.w:
+                    if hasattr(self.model.w[k], "to"):
+                        self.model.w[k] = self.model.w[k].cpu()
+            # Also move state to CPU if present
+            if self.state is not None:
+                self.state = [s.cpu() if hasattr(s, "cpu") else s for s in self.state]
+        except Exception:
+            pass
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def reload_to_gpu(self) -> None:
+        """Reload model from disk back onto GPU after LoRA subprocess completes."""
+        if not hasattr(self, "_model_path") or self._model_path is None:
+            return
+        self.load(self._model_path, self._model_strategy, self._vocab_path)
 
     def generate(
         self,
