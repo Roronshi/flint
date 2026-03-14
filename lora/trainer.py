@@ -109,12 +109,14 @@ class RWKVLoRATrainer:
         """
         Return a flat {name: tensor} dict from the model.
         backend       = RWKVBackend instance
-        backend.model = RWKV_x070 instance  (has .w)
+        backend.model = RWKV_x070 instance  (RWKV-7 uses .z, older RWKV uses .w)
         """
         # backend is RWKVBackend; the actual RWKV_x070 model is backend.model
         rwkv_model = getattr(self.backend, "model", None)
+        if rwkv_model is not None and hasattr(rwkv_model, "z"):
+            return rwkv_model.z  # RWKV_x070 (RWKV-7) stores weights in .z
         if rwkv_model is not None and hasattr(rwkv_model, "w"):
-            return rwkv_model.w  # direct reference — mutations affect the model
+            return rwkv_model.w  # older RWKV class stores weights in .w
         raise RuntimeError(
             f"Cannot access model weights: "
             f"backend={type(self.backend).__name__} "
@@ -123,21 +125,22 @@ class RWKVLoRATrainer:
 
     def _inject_adapters(self):
         """Build LoRALinear adapters for target attention projection weights.
-        
+
         RWKV-7 G1 .pth keys look like:
             blocks.N.att.receptance.weight  (2560, 2560)
             blocks.N.att.key.weight
             blocks.N.att.value.weight
             blocks.N.att.output.weight
+
+        Also caches a CPU fp32 copy of all model weights once so that
+        _forward_for_training avoids repeated CUDA→CPU copies per step.
         """
         weight_dict = self._get_weight_dict()
         self._adapters = {}
-        self._weight_dict = weight_dict  # direct reference to model.w
 
         for key, tensor in weight_dict.items():
             if not isinstance(tensor, torch.Tensor) or tensor.dim() != 2:
                 continue
-            # Key format: blocks.N.att.receptance.weight
             parts = key.split(".")
             if (
                 len(parts) == 5
@@ -146,55 +149,164 @@ class RWKVLoRATrainer:
                 and parts[3] in self.TARGET_LAYERS
                 and parts[4] == "weight"
             ):
-                # adapter name = key without .weight suffix
-                name = ".".join(parts[:4])  # blocks.N.att.receptance
+                name = ".".join(parts[:4])
                 lora = LoRALinear(
-                    tensor.to(self.device),
+                    tensor.float().cpu(),  # fp32 on CPU for training
                     r=self.r,
                     alpha=self.alpha,
                     dropout=self.dropout,
-                ).to(self.device)
+                ).to("cpu")
                 self._adapters[name] = lora
                 log.debug("Injected LoRA adapter: %s", key)
 
         log.info("Injected %d LoRA adapters", len(self._adapters))
 
-    # ── Forward pass (manual, stateless) ────────────────────────────────────
+        # Cache all model tensors on CPU (fp32) once — avoids per-step GPU→CPU copies
+        log.info("Caching model weights on CPU for training...")
+        self._cpu_z: dict = {}
+        for key, tensor in weight_dict.items():
+            if isinstance(tensor, torch.Tensor):
+                self._cpu_z[key] = tensor.float().cpu()
+        log.info("Weight cache ready (%d tensors)", len(self._cpu_z))
 
-    def _forward_with_adapters(self, token_ids: List[int]) -> torch.Tensor:
+    def _w(self, key: str) -> torch.Tensor:
+        """Return CPU fp32 weight for key, using LoRA-merged version if available."""
+        name = key[:-7] if key.endswith(".weight") else key
+        if name in self._adapters:
+            return self._adapters[name].merged_weight()
+        return self._cpu_z[key]
+
+    # ── Forward pass (gradient-enabled, CPU) ─────────────────────────────────
+
+    def _forward_for_training(self, token_ids: List[int]) -> torch.Tensor:
         """
-        Run a stateless forward pass, temporarily patching weights with merged
-        LoRA deltas. Works with both .w dict and TorchScript state_dict.
+        Gradient-enabled forward pass for RWKV-7 G1 running on CPU.
+
+        Mirrors forward_seq from rwkv.model but without torch.no_grad(), so
+        that gradients flow through the LoRA-merged attention weight matrices.
+        Uses pre-cached CPU fp32 weights from self._cpu_z to avoid repeated
+        CUDA→CPU copies.
+
+        Returns logits of shape (T, vocab_size).
         """
-        model = self.backend.model  # RWKV_x070 instance
-        w = self._weight_dict        # = model.w (direct reference)
+        model = self.backend.model
+        H, N = model.n_head, model.head_size
+        dev = "cpu"  # always train on CPU — VRAM is occupied by inference model
 
-        # Build merged weights and patch (keys always have .weight suffix)
-        original = {}
-        for name, lora in self._adapters.items():
-            key = name + ".weight"
-            if key in w:
-                original[key] = w[key].clone()
-                w[key] = lora.merged_weight().to(w[key].dtype)
+        # Initialise state (float32, matches what generate_zero_state uses)
+        n_embd = model.n_embd
+        n_layer = model.n_layer
+        state_tmix_prev = [
+            torch.zeros(n_embd, dtype=torch.float32, device=dev)
+            for _ in range(n_layer)
+        ]
+        state_tmix_wkv = [
+            torch.zeros(H, N, N, dtype=torch.float32, device=dev)
+            for _ in range(n_layer)
+        ]
+        state_cmix_prev = [
+            torch.zeros(n_embd, dtype=torch.float32, device=dev)
+            for _ in range(n_layer)
+        ]
 
-        try:
-            tokens = torch.tensor(token_ids, dtype=torch.long).to(self.device)
-            logits, _ = model.forward(tokens, None)
-        finally:
-            for key, orig in original.items():
-                w[key] = orig
+        # Shorthand: c = self._cpu_z (pre-cached CPU fp32 weights)
+        c = self._cpu_z
 
-        return logits  # shape: (T, vocab)
+        # Embedding lookup (already layer-normed at model load time)
+        x = c['emb.weight'][token_ids]  # (T, n_embd), CPU fp32
+        T = x.shape[0]
+
+        v_first = torch.zeros_like(x)
+
+        for i in range(n_layer):
+            att = f'blocks.{i}.att.'
+            ffn = f'blocks.{i}.ffn.'
+            bbb = f'blocks.{i}.'
+
+            # ── Time-mix (attention) ─────────────────────────────────────────
+            xx_ln = F.layer_norm(x, (n_embd,),
+                                 weight=c[bbb+'ln1.weight'],
+                                 bias=c[bbb+'ln1.bias'])
+
+            sx = torch.cat((state_tmix_prev[i].unsqueeze(0), xx_ln[:-1, :]))
+            shift = sx - xx_ln
+
+            xr = xx_ln + shift * c[att+'x_r'].squeeze()
+            xw = xx_ln + shift * c[att+'x_w'].squeeze()
+            xk = xx_ln + shift * c[att+'x_k'].squeeze()
+            xv = xx_ln + shift * c[att+'x_v'].squeeze()
+            xa = xx_ln + shift * c[att+'x_a'].squeeze()
+            xg = xx_ln + shift * c[att+'x_g'].squeeze()
+
+            r = xr @ self._w(att+'receptance.weight')
+            w = torch.tanh(xw @ c[att+'w1']) @ c[att+'w2']
+            k = xk @ self._w(att+'key.weight')
+            v = xv @ self._w(att+'value.weight')
+            a = torch.sigmoid(c[att+'a0'] + (xa @ c[att+'a1']) @ c[att+'a2'])
+            g = torch.sigmoid(xg @ c[att+'g1']) @ c[att+'g2']
+
+            k_k = c[att+'k_k'].squeeze()
+            k_a = c[att+'k_a'].squeeze()
+            r_k = c[att+'r_k']
+
+            kk = F.normalize((k * k_k).view(T, H, N), dim=-1, p=2.0).view(T, H * N)
+            k  = k * (1 + (a - 1) * k_a)
+
+            if i == 0:
+                v_first = v
+            else:
+                v = v + (v_first - v) * torch.sigmoid(
+                    c[att+'v0'] + (xv @ c[att+'v1']) @ c[att+'v2']
+                )
+
+            decay_w = torch.exp(-0.606531 * torch.sigmoid(c[att+'w0'] + w))
+
+            state = state_tmix_wkv[i]
+            xx_out = torch.zeros(T, H * N, dtype=torch.float32)
+            for t in range(T):
+                r_, w_, k_, v_, kk_, a_ = r[t], decay_w[t], k[t], v[t], kk[t], a[t]
+                vk = v_.view(H, N, 1) @ k_.view(H, 1, N)
+                ab = (-kk_).view(H, N, 1) @ (kk_ * a_).view(H, 1, N)
+                state = state * w_.view(H, 1, N) + state @ ab + vk
+                xx_out[t] = (state @ r_.view(H, N, 1)).view(H * N)
+
+            state_tmix_wkv[i] = state.detach()
+            state_tmix_prev[i] = xx_ln[-1, :].detach()
+
+            xx_out = F.group_norm(xx_out.view(T, H * N), num_groups=H,
+                                  weight=c[att+'ln_x.weight'],
+                                  bias=c[att+'ln_x.bias'],
+                                  eps=64e-5).view(T, H * N)
+            rk_term = ((r * k * r_k).view(T, H, N).sum(dim=-1, keepdim=True) * v.view(T, H, N)).view(T, H * N)
+            xx_out = xx_out + rk_term
+            att_out = (xx_out * g) @ self._w(att+'output.weight')
+            x = x + att_out
+
+            # ── Channel-mix (FFN) ────────────────────────────────────────────
+            xx_ln2 = F.layer_norm(x, (n_embd,),
+                                  weight=c[bbb+'ln2.weight'],
+                                  bias=c[bbb+'ln2.bias'])
+
+            sx2 = torch.cat((state_cmix_prev[i].unsqueeze(0), xx_ln2[:-1, :]))
+            k_ffn = xx_ln2 + (sx2 - xx_ln2) * c[ffn+'x_k'].squeeze()
+            k_ffn = torch.relu(k_ffn @ c[ffn+'key.weight']) ** 2
+            ffn_out = k_ffn @ c[ffn+'value.weight']
+            state_cmix_prev[i] = xx_ln2[-1, :].detach()
+            x = x + ffn_out
+
+        x = F.layer_norm(x, (n_embd,), weight=c['ln_out.weight'], bias=c['ln_out.bias'])
+        logits = x @ c['head.weight']
+        return logits  # (T, vocab_size)
 
     # ── Loss ──────────────────────────────────────────────────────────────────
 
     def _compute_loss(self, token_ids: List[int]) -> torch.Tensor:
         if len(token_ids) < 2:
             return torch.tensor(0.0, requires_grad=True, device=self.device)
-        logits = self._forward_with_adapters(token_ids)  # (T, vocab)
+        logits = self._forward_for_training(token_ids)  # (T, vocab)
         # Predict next token: input[:-1] → target[1:]
         shift_logits = logits[:-1]
-        shift_labels = torch.tensor(token_ids[1:], dtype=torch.long, device=self.device)
+        shift_labels = torch.tensor(token_ids[1:], dtype=torch.long)
         return F.cross_entropy(shift_logits, shift_labels)
 
     # ── Tokenise training segments ───────────────────────────────────────────
@@ -263,6 +375,10 @@ class RWKVLoRATrainer:
         elapsed = time.time() - t0
         avg_loss = total_loss / max(steps, 1)
         log.info("Training done in %.1fs — avg loss: %.4f over %d steps", elapsed, avg_loss, steps)
+
+        # Free CPU weight cache to release RAM
+        self._cpu_z = {}
+
         return {"loss": avg_loss, "steps": steps, "elapsed": elapsed}
 
     # ── Save / load adapter ───────────────────────────────────────────────────
@@ -291,15 +407,16 @@ class RWKVLoRATrainer:
             r = meta.get("r", 16)
             alpha = meta.get("alpha", 32)
             scale = alpha / r
-            w = backend.model.w
+            model = backend.model
+            z = model.z if hasattr(model, "z") else model.w
             applied = 0
             for name, state in checkpoint.get("adapters", {}).items():
                 key = name + ".weight"
-                if key not in w:
+                if key not in z:
                     continue
-                lora_A = state["lora_A"].to(w[key].device)
-                lora_B = state["lora_B"].to(w[key].device)
-                w[key] = w[key] + (lora_B @ lora_A) * scale
+                lora_A = state["lora_A"].to(z[key].device)
+                lora_B = state["lora_B"].to(z[key].device)
+                z[key] = (z[key].float() + (lora_B @ lora_A) * scale).to(z[key].dtype)
                 applied += 1
             log.info("Applied %d LoRA adapter layers from %s", applied, path)
             return applied > 0

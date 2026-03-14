@@ -9,7 +9,7 @@ override the defaults.
 # path is configured here, Flint will load it on startup.  The dummy
 # path triggers the fallback behaviour in core.model.CompanionModel,
 # allowing the backend to run without a large RWKV file.
-MODEL_PATH = "dummy"
+MODEL_PATH = "/home/daogeshi/flint/models/rwkv7-g1e-2.9b-20260312-ctx8192.pth"
 
 # Use CPU for inference by default in test environment
 MODEL_STRATEGY = "cuda fp16"

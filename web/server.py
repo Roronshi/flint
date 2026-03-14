@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+os.environ["RWKV_JIT_ON"] = "0"
+os.environ["RWKV_V7_ON"] = "1"
+
 import asyncio
 import json
 import logging
