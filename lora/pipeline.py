@@ -5,13 +5,16 @@ import json
 import random
 import shutil
 import tempfile
-import subprocess
 import threading
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import config
 from core.session import ConversationDB
+
+if TYPE_CHECKING:
+    from core.model_backends.rwkv_backend import RWKVBackend
 
 log = logging.getLogger(__name__)
 
@@ -36,8 +39,9 @@ class LoRAPipeline:
     # Class-level lock prevents concurrent training runs
     _training_lock = threading.Lock()
 
-    def __init__(self, db: ConversationDB):
+    def __init__(self, db: ConversationDB, backend=None):
         self.db = db
+        self._backend = backend
         Path(config.LORA_DIR).mkdir(parents=True, exist_ok=True)
 
     def should_run(self) -> tuple[bool, str]:
@@ -135,15 +139,7 @@ class LoRAPipeline:
             log.info(f"Dry run: {len(segments)} segments ready. Training not run.")
             return True
 
-        tmpfile = None
-        try:
-            fd, tmpfile = tempfile.mkstemp(suffix=".jsonl")
-            os.close(fd)
-            self.write_jsonl(segments, tmpfile)
-            success = self._run_peft_training(tmpfile)
-        finally:
-            if tmpfile and os.path.exists(tmpfile):
-                os.unlink(tmpfile)
+        success = self._run_peft_training(segments, backend=self._backend)
 
         self.db.log_lora_run(
             sessions_used=new_session_ids,
@@ -159,90 +155,50 @@ class LoRAPipeline:
 
         return success
 
-    def _run_peft_training(self, data_path: str) -> bool:
+    def _run_peft_training(self, segments: list, backend=None) -> bool:
         """
-        Run RWKV-PEFT training via subprocess.
-
-        Backs up the existing adapter before overwriting, so a failed run
-        never destroys the only working adapter.
+        Fine-tune using the built-in RWKVLoRATrainer (no subprocess, no deepspeed).
+        backend is the live RWKVBackend instance from the running model.
         """
-        project_root = Path(config.BASE_DIR)
-        peft_train   = project_root / "RWKV-PEFT" / "train.py"
-        # Use the venv python so RWKV-PEFT gets the same packages as Flint.
-        venv_python  = project_root / ".venv" / "bin" / "python3"
-        python_exe   = str(venv_python) if venv_python.exists() else "python3"
-
-        if not peft_train.exists():
-            log.error(f"RWKV-PEFT not found: {peft_train}")
-            log.error("Run: git clone https://github.com/Joluck/RWKV-PEFT")
+        if backend is None:
+            log.error("No backend provided to _run_peft_training — skipping.")
             return False
 
-        # Back up existing adapter before overwrite
+        from lora.trainer import RWKVLoRATrainer
+
         adapter_path = config.LORA_ADAPTER
-        backup_path  = adapter_path.replace(".pth", "_prev.pth")
+        backup_path  = adapter_path + ".bak"
+
+        # Back up existing adapter
         if os.path.exists(adapter_path):
             try:
                 shutil.copy2(adapter_path, backup_path)
-                log.info(f"Adapter backed up: {backup_path}")
             except Exception as e:
                 log.warning(f"Adapter backup failed (continuing): {e}")
 
-        import json as _json
-        lora_config = _json.dumps({
-            "r": config.LORA_R,
-            "alpha": config.LORA_ALPHA,
-            "dropout": 0.0,
-            "parts": ["att", "ffn"],
-        })
-        cmd = [
-            python_exe, str(peft_train),
-            f"--load_model={config.MODEL_PATH}",
-            f"--data_file={data_path}",
-            f"--proj_dir={str(Path(adapter_path).parent)}",
-            f"--epoch_count={config.LORA_EPOCHS}",
-            "--epoch_save=1",
-            f"--lr_init={config.LORA_LR}",
-            f"--lr_final={config.LORA_LR}",
-            "--train_type=lora",
-            f"--lora_config={lora_config}",
-            "--data_type=jsonl",
-            "--ctx_len=512",
-            "--micro_bsz=1",
-            "--accumulate_grad_batches=4",
-            "--devices=1",
-            "--precision=bf16",
-        ]
-
-        # Accumulative training from the previous adapter
-        if os.path.exists(adapter_path):
-            cmd.append(f"--peft_config={adapter_path}")
-
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=False,
-                timeout=3600,
+            trainer = RWKVLoRATrainer(
+                backend=backend,
+                r=config.LORA_R,
+                alpha=config.LORA_ALPHA,
+                lr=config.LORA_LR,
+                epochs=getattr(config, "LORA_EPOCHS", 1),
+                device="cuda" if "cuda" in config.MODEL_STRATEGY else "cpu",
+                dropout=0.05,
             )
-            if result.returncode != 0:
-                # Restore backup on failure
-                if os.path.exists(backup_path):
-                    shutil.copy2(backup_path, adapter_path)
-                    log.info("Restored previous adapter after failed training run.")
-            return result.returncode == 0
-        except subprocess.TimeoutExpired as exc:
-            # Kill the dangling process so it doesn't hold GPU memory.
-            try:
-                exc.process.kill()
-            except Exception:
-                pass
-            log.error("LoRA training exceeded 1h timeout — process killed.")
+            result = trainer.train(segments)
+            if "error" in result:
+                log.error("Trainer error: %s", result["error"])
+                return False
+            trainer.save_adapter(adapter_path)
+            log.info(
+                "LoRA training complete — loss: %.4f, steps: %d, time: %.1fs",
+                result["loss"], result["steps"], result["elapsed"],
+            )
+            return True
+        except Exception as exc:
+            log.error("LoRA training failed: %s", exc, exc_info=True)
             if os.path.exists(backup_path):
                 shutil.copy2(backup_path, adapter_path)
-                log.info("Restored previous adapter after timeout.")
-            return False
-        except Exception as e:
-            log.error("RWKV-PEFT subprocess error: %s", e)
-            if os.path.exists(backup_path):
-                shutil.copy2(backup_path, adapter_path)
-                log.info("Restored previous adapter after subprocess error.")
+                log.info("Restored previous adapter after training error.")
             return False
