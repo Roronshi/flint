@@ -305,6 +305,20 @@ class ConversationDB:
                     updated_at TEXT NOT NULL,
                     UNIQUE(scope_type, scope_id, setting_key)
                 );
+
+                CREATE TABLE IF NOT EXISTS training_runs (
+                    id TEXT PRIMARY KEY,
+                    companion_id TEXT,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    steps INTEGER DEFAULT 0,
+                    avg_loss REAL,
+                    min_loss REAL,
+                    loss_curve TEXT,
+                    success INTEGER DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_training_runs_companion
+                    ON training_runs(companion_id, started_at DESC);
                 """
             )
 
@@ -337,9 +351,10 @@ class ConversationDB:
             self._ensure_column(conn, "messages", "token_count", "INTEGER")
             self._ensure_column(conn, "messages", "imported", "INTEGER DEFAULT 0")
             self._ensure_column(conn, "messages", "metadata_json", "TEXT")
+            self._ensure_column(conn, "reflections", "shown", "INTEGER DEFAULT 0")
 
     # Exhaustive set of tables that may receive dynamic column additions at init time.
-    _ALLOWED_MIGRATION_TABLES = frozenset({"sessions", "messages"})
+    _ALLOWED_MIGRATION_TABLES = frozenset({"sessions", "messages", "reflections"})
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str):
         if table not in self._ALLOWED_MIGRATION_TABLES:
@@ -745,12 +760,19 @@ class ConversationDB:
                 ).fetchall()
             return rows
 
-    def get_recent_messages(self, limit: int = 50) -> list:
+    def get_recent_messages(self, limit: int = 50, session_id: str | None = None) -> list:
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT timestamp, role, content, session_id FROM messages ORDER BY timestamp DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if session_id is not None:
+                rows = conn.execute(
+                    "SELECT timestamp, role, content, session_id FROM messages "
+                    "WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?",
+                    (session_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT timestamp, role, content, session_id FROM messages ORDER BY timestamp DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
         return list(reversed(rows))
 
     def get_messages_after_last_block(self, companion_id: str) -> List[Dict[str, Any]]:
@@ -960,6 +982,44 @@ class ConversationDB:
             )
         return reflection_id
 
+    def get_recent_thought(self, companion_id: str, reflection_type: str) -> Optional[Dict[str, Any]]:
+        """Return the most recently created reflection of a given type."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT reflection_text, question_text, created_at FROM reflections
+                   WHERE companion_id = ? AND reflection_type = ?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (companion_id, reflection_type),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_dream_texts(self, companion_id: str, limit: int = 50) -> List[str]:
+        """Return recent dream reflection texts for LoRA training."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT reflection_text FROM reflections
+                   WHERE companion_id = ? AND reflection_type = 'dream'
+                   ORDER BY created_at DESC LIMIT ?""",
+                (companion_id, limit),
+            ).fetchall()
+        return [r["reflection_text"] for r in rows if r["reflection_text"]]
+
+    def get_top_dream_thought(self, companion_id: str) -> Optional[Dict[str, str]]:
+        """Return the highest-ranked unseen dream thought for the welcome-back message."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT id, reflection_text as text FROM reflections
+                   WHERE companion_id = ? AND reflection_type = 'dream' AND shown = 0
+                   ORDER BY priority_score * novelty_score DESC LIMIT 1""",
+                (companion_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def mark_dream_shown(self, reflection_id: str):
+        """Mark a dream reflection as shown so it is not surfaced again."""
+        with self._conn() as conn:
+            conn.execute("UPDATE reflections SET shown = 1 WHERE id = ?", (reflection_id,))
+
     def get_new_reflections(self, companion_id: str, limit: int = 10) -> List[Dict[str, Any]]:
         with self._conn() as conn:
             rows = conn.execute(
@@ -1159,9 +1219,9 @@ class ConversationDB:
             return None
         lines = []
         for role, content in messages:
-            prefix = config.USER_NAME if role == "user" else config.BOT_NAME
-            lines.append(f"<{prefix}>: {content}")
-        return "\n".join(lines)
+            prefix = "User" if role == "user" else "Assistant"
+            lines.append(f"{prefix}: {content}")
+        return "\n\n".join(lines)
 
     def get_random_old_sessions(self, n: int) -> list:
         with self._conn() as conn:
@@ -1170,6 +1230,58 @@ class ConversationDB:
                 (n,),
             ).fetchall()
         return [r["id"] for r in rows]
+
+    # ── Training run history ──────────────────────────────────────────────────
+
+    def begin_training_run(self, companion_id: str | None) -> str:
+        run_id = str(uuid.uuid4())
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO training_runs (id, companion_id, started_at) VALUES (?, ?, ?)",
+                (run_id, companion_id, datetime.now().isoformat()),
+            )
+        return run_id
+
+    def update_training_run(
+        self,
+        run_id: str,
+        steps: int,
+        avg_loss: float,
+        min_loss: float,
+        loss_curve: list,
+        success: bool,
+    ):
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE training_runs
+                   SET completed_at = ?, steps = ?, avg_loss = ?, min_loss = ?,
+                       loss_curve = ?, success = ?
+                   WHERE id = ?""",
+                (
+                    datetime.now().isoformat(),
+                    steps,
+                    avg_loss,
+                    min_loss,
+                    json.dumps(loss_curve),
+                    1 if success else 0,
+                    run_id,
+                ),
+            )
+
+    def get_training_history(self, companion_id: str | None = None, limit: int = 10) -> list:
+        with self._conn() as conn:
+            if companion_id:
+                rows = conn.execute(
+                    """SELECT * FROM training_runs WHERE companion_id = ?
+                       ORDER BY started_at DESC LIMIT ?""",
+                    (companion_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM training_runs ORDER BY started_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [dict(r) for r in rows]
 
     def log_lora_run(self, sessions_used: list, adapter_path: str, success: bool, notes: str = ""):
         with self._conn() as conn:

@@ -39,10 +39,11 @@ class LoRAPipeline:
     # Class-level lock prevents concurrent training runs
     _training_lock = threading.Lock()
 
-    def __init__(self, db: ConversationDB, backend=None):
+    def __init__(self, db: ConversationDB, backend=None, companion_id: str | None = None):
         self.db = db
         self._backend = backend
         self._progress_callback = None
+        self._companion_id = companion_id
         Path(config.LORA_DIR).mkdir(parents=True, exist_ok=True)
 
     def should_run(self) -> tuple[bool, str]:
@@ -72,9 +73,22 @@ class LoRAPipeline:
             if text and len(text.strip()) > 50:
                 training_texts.extend(self._split_into_segments(text))
 
+        # Mix in dream (synthetic inner monologue) segments
+        dream_ratio = getattr(config, "DREAM_RATIO", 0.25)
+        n_dreams    = max(1, int(len(training_texts) * dream_ratio))
+        if self._companion_id:
+            dream_texts = self.db.get_dream_texts(self._companion_id, limit=n_dreams * 2)
+            random.shuffle(dream_texts)
+            for text in dream_texts[:n_dreams]:
+                if text and len(text.strip()) > 20:
+                    training_texts.append({"text": text.strip()})
+
+        random.shuffle(training_texts)
+
         log.info(
             f"Training data: {len(new_session_ids)} new + "
-            f"{len(old_sessions)} replay = {len(training_texts)} segments"
+            f"{len(old_sessions)} replay + {min(n_dreams, len(dream_texts) if self._companion_id else 0)} dreams"
+            f" = {len(training_texts)} segments"
         )
         return new_session_ids, training_texts
 
@@ -140,7 +154,16 @@ class LoRAPipeline:
             log.info(f"Dry run: {len(segments)} segments ready. Training not run.")
             return True
 
-        success = self._run_peft_training(segments, backend=self._backend)
+        run_id = self.db.begin_training_run(self._companion_id)
+        success, train_result = self._run_peft_training(segments, backend=self._backend)
+        self.db.update_training_run(
+            run_id=run_id,
+            steps=train_result.get("steps", 0),
+            avg_loss=train_result.get("loss", 0.0),
+            min_loss=train_result.get("min_loss", 0.0),
+            loss_curve=train_result.get("loss_curve", []),
+            success=success,
+        )
 
         self.db.log_lora_run(
             sessions_used=new_session_ids,
@@ -156,21 +179,23 @@ class LoRAPipeline:
 
         return success
 
-    def _run_peft_training(self, segments: list, backend=None) -> bool:
+    def _run_peft_training(self, segments: list, backend=None) -> tuple[bool, dict]:
         """
         Fine-tune in-process using RWKVLoRATrainer.
         JIT is disabled globally (RWKV_JIT_ON=0) so model.w is accessible.
         Progress reported via self._progress_callback if set.
         Chat is blocked externally via state.training_active flag.
+        Returns (success, result_dict).
         """
         from lora.trainer import RWKVLoRATrainer
 
         adapter_path = config.LORA_ADAPTER
         backup_path  = adapter_path + ".bak"
+        _empty = {"steps": 0, "loss": 0.0, "min_loss": 0.0, "loss_curve": []}
 
         if backend is None:
             log.error("No backend provided — cannot train in-process.")
-            return False
+            return False, _empty
 
         if os.path.exists(adapter_path):
             try:
@@ -199,19 +224,19 @@ class LoRAPipeline:
             )
             if "error" in result:
                 log.error("Trainer error: %s", result["error"])
-                return False
+                return False, _empty
             trainer.save_adapter(adapter_path)
             log.info(
                 "LoRA training complete — loss: %.4f steps: %d elapsed: %.1fs",
                 result["loss"], result["steps"], result["elapsed"],
             )
-            return True
+            return True, result
         except Exception as exc:
             log.error("LoRA training failed: %s", exc, exc_info=True)
             if os.path.exists(backup_path):
                 shutil.copy2(backup_path, adapter_path)
                 log.info("Restored previous adapter after training error.")
-            return False
+            return False, _empty
         finally:
             # Reload inference model back to GPU regardless of success/failure
             if hasattr(backend, "reload_to_gpu"):

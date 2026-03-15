@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import threading
 from datetime import datetime, timedelta
 from typing import Callable, Dict, Optional
@@ -20,12 +21,25 @@ class ScheduledJob:
         self.last_error: Optional[str] = None
 
 
+_IDLE_THRESHOLD_SECONDS = 5 * 60  # 5 minutes
+
+
 class SchedulerService:
     def __init__(self, db: ConversationDB):
         self.db = db
         self._jobs: Dict[str, ScheduledJob] = {}
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._get_last_activity: Optional[Callable[[], float]] = None
+
+    def set_activity_source(self, fn: Callable[[], float]):
+        """Register a callable that returns the timestamp of last user activity."""
+        self._get_last_activity = fn
+
+    def _is_user_idle(self) -> bool:
+        if self._get_last_activity is None:
+            return True
+        return (time.time() - self._get_last_activity()) >= _IDLE_THRESHOLD_SECONDS
 
     def register_job(self, name: str, interval_seconds: int, fn: Callable[[], int | bool | None]):
         self._jobs[name] = ScheduledJob(name, interval_seconds, fn)
@@ -56,10 +70,11 @@ class SchedulerService:
     def _loop(self):
         while not self._stop.is_set():
             now = datetime.now()
-            for job in self._jobs.values():
-                if job.last_run and now - job.last_run < timedelta(seconds=job.interval_seconds):
-                    continue
-                self._run_job(job, now)
+            if self._is_user_idle():
+                for job in self._jobs.values():
+                    if job.last_run and now - job.last_run < timedelta(seconds=job.interval_seconds):
+                        continue
+                    self._run_job(job, now)
             self._stop.wait(15)
 
     def _run_job(self, job: ScheduledJob, scheduled_for: datetime):

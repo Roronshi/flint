@@ -11,6 +11,7 @@ from typing import Optional
 import config
 from core.session import ConversationDB
 from lora.pipeline import LoRAPipeline
+from services.backup_service import BackupService
 
 log = logging.getLogger(__name__)
 
@@ -25,9 +26,11 @@ class LoRAScheduler:
     Runs as a daemon thread so the chat is never blocked.
     """
 
-    def __init__(self, db: ConversationDB):
-        self.db         = db
-        self.pipeline   = LoRAPipeline(db, backend=None)  # backend set later via set_backend()
+    def __init__(self, db: ConversationDB, companion_id: str | None = None):
+        self.db           = db
+        self.companion_id = companion_id
+        self.pipeline     = LoRAPipeline(db, backend=None, companion_id=companion_id)  # backend set later via set_backend()
+        self._backup      = BackupService()
         self._thread: threading.Thread = None
         self._stop_event = threading.Event()
         self.last_run: Optional[datetime] = self._load_last_run()
@@ -103,10 +106,16 @@ class LoRAScheduler:
     def _run_training(self):
         log.info("Starting LoRA training run...")
         try:
-            success      = self.pipeline.run()
+            success       = self.pipeline.run()
             self.last_run = datetime.now()
             self._save_last_run(self.last_run)
             log.info(f"LoRA training {'complete' if success else 'failed'}.")
+            if success:
+                try:
+                    result = self._backup.run_backup(self.companion_id)
+                    log.info("Post-training backup: %s", result["files"])
+                except Exception as be:
+                    log.warning("Backup after training failed: %s", be)
         except Exception as e:
             log.error(f"Uncaught error in LoRA scheduler: {e}", exc_info=True)
 

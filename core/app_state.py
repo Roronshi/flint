@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING, Optional
@@ -24,6 +25,7 @@ class AppState:
     active_model_id: Optional[str] = None
     training_active: bool = False
     training_progress: dict = field(default_factory=dict)  # epoch/step/total/loss
+    last_user_activity: float = field(default_factory=time.time)
 
     @property
     def avg_tokens_per_second(self) -> float:

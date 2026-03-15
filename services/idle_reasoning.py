@@ -41,9 +41,9 @@ class IdleReasoningService:
         # The model sees itself mid-conversation and naturally continues as companion.
         return (
             f"User: What's been on your mind lately?\n\n"
-            f"{config.BOT_NAME}: I've been thinking about some of the things we've talked about.\n\n"
+            f"Assistant: I've been thinking about some of the things we've talked about.\n\n"
             f"User: Like what?\n\n"
-            f"{config.BOT_NAME}: Things like:\n{topics_txt}\n\n"
+            f"Assistant: Things like:\n{topics_txt}\n\n"
             f"It makes me want to ask you something. "
         )
 

@@ -48,6 +48,12 @@ REPLAY_RATIO    = 0.3
 LORA_SCHEDULE   = "03:00"
 MAX_SEQ_LEN     = 2048
 
+# ── Dream (synthetic inner monologue) ─────────────────────────────────────────
+DREAM_RATIO            = 0.25   # Fraction of training segments that are dreams
+DREAM_MAX_TOKENS       = 150    # Max tokens per dream generation
+DREAM_TEMPERATURE      = 0.88   # High temp for non-predictable, genuine output
+DREAM_INTERVAL_SECONDS = 1800   # Run dream job every 30 min of idle time
+
 # ── Generation ────────────────────────────────────────────────────────────────
 MAX_TOKENS      = 500
 TEMPERATURE     = 1.0
@@ -117,7 +123,13 @@ STOP_SEQUENCES = [
     f"\n\n<{USER_NAME}>",
     f"\n<{USER_NAME}>",
     "\n\nUser:",
+    "\nUser:",
+    " User:",         # inline, no leading newline
     "\n\nHuman:",
+    "\nHuman:",
+    " Human:",        # inline, no leading newline
+    "\n\nAssistant:", # prevent model from hallucinating its own next turn
+    "\nAssistant:",
 ]
 
 # ── Configure logging ─────────────────────────────────────────────────────────

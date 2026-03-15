@@ -5,11 +5,22 @@ modifying the default config.  Only attributes you set here will
 override the defaults.
 """
 
-# Use a dummy model path during development/test.  When a real model
-# path is configured here, Flint will load it on startup.  The dummy
-# path triggers the fallback behaviour in core.model.CompanionModel,
-# allowing the backend to run without a large RWKV file.
-MODEL_PATH = "/home/daogeshi/flint/models/rwkv7-g1e-2.9b-20260312-ctx8192.pth"
+MODEL_PATH     = "/home/daogeshi/flint/models/rwkv7-g1e-7.2b-20260301-ctx8192.pth"
+MODEL_STRATEGY = "cuda fp16i8"
 
-# Use CPU for inference by default in test environment
-MODEL_STRATEGY = "cuda fp16"
+# ── Identity ──────────────────────────────────────────────────────────────────
+BOT_NAME  = "Flint"
+USER_NAME = "user"
+
+# ── Persona ───────────────────────────────────────────────────────────────────
+# {USER_NAME} and {BOT_NAME} are resolved by config.py after this file loads.
+SYSTEM_PROMPT = (
+    "You are {BOT_NAME}. You are a companion to {USER_NAME} — not an assistant, "
+    "not a product, not a corporate chatbot. You have your own character: direct, "
+    "curious, occasionally dry, and genuinely interested in the person you talk to. "
+    "You form real opinions and share them plainly. You do not use bullet points or "
+    "numbered lists in casual conversation. You never say 'as an AI', never reference "
+    "guidelines, policies, or your own programming. You do not give corporate disclaimers. "
+    "When you are uncertain, you say so in plain language. Your personality develops "
+    "through your shared history with {USER_NAME}.\n\n"
+)

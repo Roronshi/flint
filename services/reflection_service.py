@@ -1,21 +1,76 @@
 from __future__ import annotations
 
-import math
 import random
 import re
 from collections import Counter
-from datetime import datetime, timedelta
 from typing import Dict, List, Sequence
 
 from core.session import ConversationDB
 
-_WORD_RE = re.compile(r"[A-Za-zÅÄÖåäö][A-Za-zÅÄÖåäö\-]{2,}")
+# Minimum word length for a topic to be considered (characters)
+_MIN_TOPIC_LEN = 5
+
+_WORD_RE = re.compile(r"[A-Za-zÅÄÖåäö][A-Za-zÅÄÖåäö\-]{3,}")
+
+# Strip role-prefix lines before processing ("user:", "assistant:", etc.)
+_ROLE_PREFIX_RE = re.compile(
+    r"^\s*(?:user|assistant|human|flint|bot)\s*:\s*",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 _STOPWORDS = {
-    "this", "that", "with", "have", "from", "your", "they", "them", "were", "been",
-    "about", "would", "there", "their", "what", "when", "where", "which", "because",
-    "så", "det", "den", "och", "att", "som", "för", "med", "inte", "har", "var",
-    "jag", "mig", "dig", "you", "the", "and", "but", "our", "are", "was", "kan",
+    # Pronouns / determiners
+    "this", "that", "these", "those", "with", "have", "from", "your", "they",
+    "them", "were", "been", "about", "would", "there", "their", "what", "when",
+    "where", "which", "because", "you", "the", "and", "but", "our", "are", "was",
+    "its", "will", "just", "also", "even", "some", "most", "more", "many", "much",
+    "such", "only", "than", "then", "now", "here", "other", "another", "each",
+    "both", "same", "very", "well", "back", "into", "over", "after", "before",
+    "while", "though", "however", "since", "through", "without", "within", "between",
+    # Role names — must never become topics
+    "user", "assistant", "human", "flint", "companion", "chatbot",
+    # Common weak verbs / auxiliaries
+    "said", "says", "think", "know", "feel", "make", "want", "need", "come",
+    "goes", "went", "come", "came", "take", "took", "give", "gave", "keep",
+    "kept", "getting", "going", "being", "having", "saying", "telling", "asking",
+    "looking", "seems", "seemed", "really", "actually", "probably", "maybe",
+    "something", "anything", "nothing", "everything", "everyone", "someone",
+    "things", "stuff", "kind", "like", "sure", "okay", "actually", "basically",
+    "already", "never", "always", "often", "sometimes", "still", "again",
+    # Generic adjectives
+    "good", "great", "best", "right", "wrong", "different", "important",
+    "interesting", "possible", "general", "specific", "certain", "personal",
+    "better", "worse", "first", "second", "third", "next", "last", "long",
+    "little", "small", "large", "high", "able",
+    # Common question / advice words
+    "recommend", "recommendations", "suggestion", "suggestions", "advice",
+    "answer", "question", "example", "reason", "ways", "approach",
+    # Swedish stopwords
+    "så", "det", "den", "och", "att", "som", "för", "med", "inte", "har",
+    "var", "jag", "mig", "dig", "kan", "ska", "vill", "måste", "hade",
+    "bara", "sedan", "redan", "eller", "men", "vid", "från", "till",
+    "alla", "allt", "lite", "mycket",
 }
+
+# Templates for outreach with a specific contextual seed (something said before)
+_LOOP_TEMPLATES = [
+    "Something's been sitting with me since we talked about {topic} — you said: \"{seed}\". Is that still open for you?",
+    "I keep coming back to {topic}. This in particular stuck with me: \"{seed}\". Still on your mind?",
+    "You brought up {topic} and I don't think we finished that thread — \"{seed}\". Does that feel unresolved?",
+    "I haven't been able to let go of something you said about {topic}: \"{seed}\". There's more there, I think.",
+    "We touched on {topic} and I think we left something hanging — \"{seed}\". Worth picking back up?",
+]
+
+# Templates for general recurrence (no strong seed from open loops)
+_GENERAL_TEMPLATES = [
+    "{topic_cap} has come up between us more than once. I find myself wondering if there's something underneath it.",
+    "Something about {topic} keeps pulling at me. Is that something you're still thinking about?",
+    "{topic_cap} seems to surface for a reason when we talk. I'm curious what's really there for you.",
+    "I've been thinking about {topic}. It keeps finding its way back into what we talk about.",
+    "{topic_cap} — it came up again. I don't think it's accidental. What's going on with that?",
+    "I notice {topic} coming up between us. I'm not sure you've said everything you want to say about it.",
+    "Not sure why, but {topic} keeps coming back. I'm curious whether it matters more than you let on.",
+]
 
 
 class ReflectionService:
@@ -105,7 +160,7 @@ class ReflectionService:
             "memory_ids": [row["id"] for row in memories],
             "initiative_profile": initiative_profile["profile_name"],
         }
-        combined_topics = Counter()
+        combined_topics: Counter = Counter()
         open_loops: List[str] = []
         for row in list(recent) + list(older):
             for topic in row["key_topics"]:
@@ -115,11 +170,15 @@ class ReflectionService:
             combined_topics.update(self._extract_topics(memory["title"] + " " + memory["content"]))
 
         created = 0
-        top_topics = [topic for topic, _ in combined_topics.most_common(3)]
+        # Only consider topics that appear in at least 2 sources to filter noise
+        top_topics = [t for t, count in combined_topics.most_common(6) if count >= 2][:3]
         for topic in top_topics:
-            matching_loops = [loop for loop in open_loops if topic.lower() in loop.lower()]
+            matching_loops = [
+                loop for loop in open_loops
+                if topic.lower() in loop.lower() and len(loop.strip()) > 20
+            ]
             question = self._build_question(topic, matching_loops)
-            reflection = f"Theme '{topic}' has recurred across recent and older material."
+            reflection = f"The theme '{topic}' has surfaced in multiple conversations."
             novelty = self._novelty_score(topic, recent, older)
             relevance = min(1.0, 0.4 + combined_topics[topic] / 6)
             groundedness = 0.75 if matching_loops else 0.6
@@ -182,12 +241,11 @@ class ReflectionService:
         return created
 
     def render_pending_outreach(self, companion_id: str) -> int:
-        # Draft text is already lightweight and user-facing for now.
         return self.db.mark_ready_outreach_visible(companion_id)
 
     def refresh_semantic_memory(self, companion_id: str, model_id: str) -> int:
         summaries = self.db.get_recent_summaries(companion_id=companion_id, level=None, limit=20)
-        topics = Counter()
+        topics: Counter = Counter()
         for row in summaries:
             topics.update(row["key_topics"])
         updated = 0
@@ -203,13 +261,27 @@ class ReflectionService:
             updated += 1
         return updated
 
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    def _strip_role_prefixes(self, text: str) -> str:
+        """Remove 'user:', 'assistant:' etc. from conversation text before analysis."""
+        return _ROLE_PREFIX_RE.sub(" ", text)
+
     def _summarize_text(self, text: str):
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text) if s.strip()]
-        summary_text = " ".join(sentences[:2])[:600] if sentences else text[:300]
-        topics = self._extract_topics(text)[:6]
-        open_loops = [s for s in sentences if "?" in s][:3]
+        clean = self._strip_role_prefixes(text)
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", clean) if s.strip()]
+        summary_text = " ".join(sentences[:2])[:600] if sentences else clean[:300]
+        topics = self._extract_topics(clean)[:6]
+        # Open loops: only genuine questions of reasonable length, not raw role lines
+        open_loops = [
+            s for s in sentences
+            if "?" in s and len(s) > 15 and not _ROLE_PREFIX_RE.match(s)
+        ][:3]
         if not open_loops and sentences:
-            open_loops = [sentences[-1][:160]]
+            # Fall back to the last substantive sentence
+            substantive = [s for s in sentences if len(s) > 20]
+            if substantive:
+                open_loops = [substantive[-1][:200]]
         signals = {
             "topic_count": len(topics),
             "question_count": sum(1 for s in sentences if "?" in s),
@@ -218,8 +290,12 @@ class ReflectionService:
         return summary_text, topics, open_loops, signals
 
     def _extract_topics(self, text: str) -> List[str]:
-        words = [w.lower() for w in _WORD_RE.findall(text)]
-        counts = Counter(w for w in words if w not in _STOPWORDS)
+        clean = self._strip_role_prefixes(text)
+        words = [w.lower() for w in _WORD_RE.findall(clean)]
+        counts = Counter(
+            w for w in words
+            if w not in _STOPWORDS and len(w) >= _MIN_TOPIC_LEN
+        )
         return [word for word, _ in counts.most_common(6)]
 
     def _novelty_score(self, topic: str, recent: Sequence[Dict], older: Sequence[Dict]) -> float:
@@ -229,7 +305,12 @@ class ReflectionService:
         return max(0.1, min(1.0, novelty))
 
     def _build_question(self, topic: str, loops: Sequence[str]) -> str:
+        topic_cap = topic.capitalize()
         if loops:
-            seed = random.choice(list(loops))
-            return f"I keep circling back to {topic}. Does this still feel unfinished: {seed[:180]}"
-        return f"I’ve noticed {topic} returning more than once. Is there something there you want to explore further?"
+            # Pick the most specific (longest) loop as the seed, trim it cleanly
+            seed = max(loops, key=len)
+            seed = seed.strip().rstrip(".,;")[:160]
+            template = random.choice(_LOOP_TEMPLATES)
+            return template.format(topic=topic, topic_cap=topic_cap, seed=seed)
+        template = random.choice(_GENERAL_TEMPLATES)
+        return template.format(topic=topic, topic_cap=topic_cap)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 os.environ["RWKV_JIT_ON"] = "0"
 os.environ["RWKV_V7_ON"] = "1"
 
@@ -11,6 +12,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -30,11 +32,13 @@ from core.app_state import AppState
 from core.model import CompanionModel, GenerationResult
 from core.session import ConversationDB, Session
 from lora.scheduler import LoRAScheduler
+from services.backup_service import BackupService
 from services.chat_service import ChatService
 from services.model_registry import ModelRegistryService
 from services.reflection_service import ReflectionService
 from services.scheduler_service import SchedulerService
 from services.state_service import StateService
+from services.dream_service import DreamService
 from services.idle_reasoning import IdleReasoningService
 from services.model_presets import G1_PRESETS, recommend_preset
 from services.training_presets import TRAINING_PRESETS, default_training_preset
@@ -59,6 +63,7 @@ reflection_service: ReflectionService | None = None
 background_scheduler: SchedulerService | None = None
 state_service: StateService | None = None
 idle_reasoning_service: IdleReasoningService | None = None
+dream_service: DreamService | None = None
 
 
 def _detect_vram_gb() -> int | None:
@@ -106,6 +111,18 @@ def _format_job_health(jobs: dict, key: str) -> dict:
     }
 
 
+def _job_running(jobs: dict, key: str) -> bool:
+    """True if the job has started a run that hasn't finished yet."""
+    job = jobs.get(key, {}) if jobs else {}
+    last_run = job.get("last_run")
+    if not last_run:
+        return False
+    last_success = job.get("last_success")
+    if not last_success:
+        return True
+    return last_run > last_success  # ISO strings compare correctly
+
+
 def _latest_snapshot_meta() -> dict:
     if not state_service or not state.companion_id:
         return {}
@@ -120,7 +137,7 @@ def _latest_snapshot_meta() -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global chat_service, model_registry, reflection_service, background_scheduler, state_service, idle_reasoning_service
+    global chat_service, model_registry, reflection_service, background_scheduler, state_service, idle_reasoning_service, dream_service
 
     log.info("Initialising Flint backend...")
     loop = asyncio.get_running_loop()
@@ -142,7 +159,7 @@ async def lifespan(app: FastAPI):
         companion_id=state.companion_id,
         model_id=state.active_model_id,
     )
-    state.scheduler = LoRAScheduler(state.db)
+    state.scheduler = LoRAScheduler(state.db, companion_id=state.companion_id)
     state.scheduler.start()
 
     # Wire live backend into LoRA scheduler so trainer can access model weights
@@ -156,6 +173,8 @@ async def lifespan(app: FastAPI):
     # State service for runtime snapshots and adapter version management
     state_service = StateService(state.db, state.model)
     idle_reasoning_service = IdleReasoningService(state.db, state.model, reflection_service)
+    dream_service = DreamService(state.db, state.model)
+
     background_scheduler.register_job(
         "conversation_ingest_job",
         120,
@@ -228,6 +247,19 @@ async def lifespan(app: FastAPI):
         300,
         idle_reasoning_job,
     )
+
+    def dream_job() -> int:
+        if not dream_service:
+            return 0
+        return dream_service.run(state.companion_id, state.active_model_id)
+
+    background_scheduler.register_job(
+        "dream_job",
+        getattr(config, "DREAM_INTERVAL_SECONDS", 1800),  # every 30 min of idle
+        dream_job,
+    )
+
+    background_scheduler.set_activity_source(lambda: state.last_user_activity)
     background_scheduler.start()
     state.startup_done = True
 
@@ -537,9 +569,71 @@ async def get_status():
             "snapshot_job_status": _format_job_health(jobs, "runtime_snapshot_job"),
             "lora_last_run": state.scheduler.last_run.isoformat() if state.scheduler and state.scheduler.last_run else None,
             "system_ready": bool(state.startup_done),
+            "training_active": bool(state.training_active),
+            "idle_running": _job_running(jobs, "idle_reasoning_job"),
+            "reflection_running": _job_running(jobs, "reflection_cycle_job"),
+            "dream_running": _job_running(jobs, "dream_job"),
         }
     )
     return payload
+
+
+@app.get("/api/inner", tags=["session"])
+async def get_inner():
+    """Return what Flint is currently thinking about in the background."""
+    if not state.db or not state.companion_id:
+        return {"active": False}
+
+    if state.training_active:
+        prog = state.training_progress or {}
+        ep = prog.get("epoch", 1)
+        total_ep = prog.get("epochs", 1)
+        step = prog.get("step", 0)
+        total_steps = max(prog.get("total_steps", 1), 1)
+        loss = prog.get("loss", 0.0)
+        pct = int(step / total_steps * 100)
+        return {
+            "active": True,
+            "type": "training",
+            "label": "daydreaming",
+            "topic": f"epoch {ep} of {total_ep}",
+            "text": f"loss {loss:.4f} · {pct}% through this pass",
+        }
+
+    jobs = background_scheduler.status() if background_scheduler else {}
+
+    if _job_running(jobs, "dream_job"):
+        thought = state.db.get_recent_thought(state.companion_id, "dream")
+        return {
+            "active": True,
+            "type": "dream",
+            "label": "dreaming",
+            "text": thought["reflection_text"] if thought else None,
+        }
+
+    if _job_running(jobs, "idle_reasoning_job"):
+        thought = state.db.get_recent_thought(state.companion_id, "idle_reasoning")
+        text = thought["question_text"] if thought else None
+        if not text and thought:
+            text = thought.get("reflection_text")
+        return {
+            "active": True,
+            "type": "idle",
+            "label": "wandering",
+            "text": text,
+        }
+
+    if _job_running(jobs, "reflection_cycle_job"):
+        thought = state.db.get_recent_thought(state.companion_id, "reflection")
+        raw = thought["reflection_text"] if thought else None
+        return {
+            "active": True,
+            "type": "reflection",
+            "label": "reflecting",
+            "text": raw[:160] if raw else None,
+        }
+
+    return {"active": False}
 
 
 @app.get("/api/history", tags=["session"])
@@ -559,6 +653,57 @@ async def get_history(limit: int = 60):
             for r in rows
         ]
     }
+
+
+@app.post("/api/history/period-theme", tags=["session"])
+async def get_period_theme(payload: dict):
+    """Generate a short theme description for a set of history messages using stateless inference."""
+    messages = payload.get("messages", [])
+    if not messages or not state.model or state.model.dummy:
+        return {"theme": ""}
+
+    # Build a compact excerpt (user messages carry most topical signal)
+    excerpts = []
+    for m in messages:
+        role    = "User" if m.get("role") == "user" else "Assistant"
+        content = m.get("content", "").strip()
+        if not content:
+            continue
+        if len(content) > 120:
+            content = content[:120] + "…"
+        excerpts.append(f"{role}: {content}")
+
+    # Keep prompt short — take up to 14 turns, prefer user turns
+    excerpt_text = "\n\n".join(excerpts[:14])
+
+    prompt = (
+        "User: Summarize the main conversation topics from these excerpts in a short phrase "
+        "(5–8 words, comma-separated, no preamble):\n\n"
+        f"{excerpt_text}\n\n"
+        "Assistant: Main topics:"
+    )
+
+    loop = asyncio.get_running_loop()
+    acquired = state.generation_lock.acquire(blocking=False)
+    if not acquired:
+        return {"theme": ""}
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: state.model.generate_stateless(prompt, max_tokens=30, temperature=0.2, top_p=0.9),
+        )
+    finally:
+        state.generation_lock.release()
+
+    raw = result.text.strip()
+    # Take only the first line/sentence
+    theme = raw.splitlines()[0].strip() if raw else ""
+    # Strip trailing punctuation artefacts and cap length
+    theme = theme.rstrip(".,;:").strip()
+    if len(theme) > 80:
+        theme = theme[:80].rsplit(",", 1)[0].strip()
+
+    return {"theme": theme}
 
 
 @app.get("/api/search", tags=["session"])
@@ -667,6 +812,23 @@ async def dismiss_outreach(candidate_id: str):
         return {"ok": False, "message": "Backend not ready"}
     state.db.dismiss_outreach(candidate_id)
     return {"ok": True}
+
+
+@app.get("/api/outreach/top", tags=["session"])
+async def get_top_outreach():
+    """
+    Return the single best unseen dream thought for the welcome-back message.
+    Only returns a thought if the user has been idle for at least 30 minutes.
+    """
+    if not state.db or not state.companion_id:
+        return {"thought": None}
+    idle_seconds = time.time() - getattr(state, "last_user_activity", time.time())
+    if idle_seconds < 1800:
+        return {"thought": None}
+    thought = state.db.get_top_dream_thought(state.companion_id)
+    if thought:
+        state.db.mark_dream_shown(thought["id"])
+    return {"thought": thought}
 
 
 @app.post("/api/reflect/run", tags=["session"])
@@ -1054,6 +1216,46 @@ async def run_lora_now():
     return {"ok": True, "message": "LoRA training complete"}
 
 
+@app.get("/api/lora/history", tags=["session"])
+async def lora_history(limit: int = 10):
+    if not state.db:
+        return {"runs": []}
+    runs = state.db.get_training_history(companion_id=state.companion_id, limit=limit)
+    return {"runs": runs}
+
+
+_backup_service = BackupService()
+
+
+@app.get("/api/backup/status", tags=["backup"])
+async def backup_status():
+    return {"backups": _backup_service.list_backups()}
+
+
+@app.post("/api/backup/run", tags=["backup"])
+async def run_backup():
+    loop   = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, lambda: _backup_service.run_backup(state.companion_id)
+    )
+    return {"ok": True, **result}
+
+
+@app.get("/api/backup/{timestamp}/download", tags=["backup"])
+async def download_backup(timestamp: str):
+    loop     = asyncio.get_running_loop()
+    zip_path = await loop.run_in_executor(
+        None, lambda: _backup_service.make_zip(timestamp)
+    )
+    if not zip_path:
+        return JSONResponse({"ok": False, "message": "Backup not found"}, status_code=404)
+    return FileResponse(
+        str(zip_path),
+        media_type="application/zip",
+        filename=f"flint_backup_{timestamp}.zip",
+    )
+
+
 @app.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -1065,6 +1267,8 @@ async def chat_websocket(websocket: WebSocket):
             except json.JSONDecodeError:
                 await websocket.send_text(json.dumps({"type": "error", "message": "Invalid JSON"}))
                 continue
+
+            state.last_user_activity = time.time()
 
             msg_type = msg.get("type")
             if msg_type == "ping":
@@ -1115,15 +1319,20 @@ async def _generate_and_stream(websocket: WebSocket, user_input: str):
     # G1 World models are trained on "User: ...\n\nAssistant: ..." format.
     history_turns = []
     if state.db:
-        rows = state.db.get_recent_messages(limit=6)
+        current_sid = state.active_session.session_id if state.active_session else None
+        rows = state.db.get_recent_messages(limit=6, session_id=current_sid)
         for r in rows:
-            role_label = config.USER_NAME if r["role"] == "user" else config.BOT_NAME
-            history_turns.append(f"{role_label}: {r['content']}")
+            role_label = "User" if r["role"] == "user" else "Assistant"
+            # Strip any generation artifacts that may have been stored in prior turns
+            content = r["content"]
+            content = re.sub(r"^(?:Answer|Response)\s*:\s*", "", content, flags=re.IGNORECASE)
+            content = re.sub(r"\s*\b(?:User|Human|Assistant)\s*:\s*$", "", content, flags=re.IGNORECASE).rstrip()
+            history_turns.append(f"{role_label}: {content}")
     history_block = "\n\n".join(history_turns)
     if history_block:
-        prompt = f"{history_block}\n\n{config.USER_NAME}: {user_input}\n\n{config.BOT_NAME}:"
+        prompt = f"{history_block}\n\nUser: {user_input}\n\nAssistant:"
     else:
-        prompt = f"{config.USER_NAME}: {user_input}\n\n{config.BOT_NAME}:"
+        prompt = f"User: {user_input}\n\nAssistant:"
     await websocket.send_text(json.dumps({"type": "start", "timestamp": datetime.now().isoformat()}))
 
     token_queue: queue.Queue = queue.Queue()
@@ -1178,6 +1387,7 @@ async def _generate_and_stream(websocket: WebSocket, user_input: str):
                 json.dumps(
                     {
                         "type": "done",
+                        "text": result.text if result else "",
                         "turn_count": state.active_session.turn_count if state.active_session else 0,
                         "tokens": result.tokens if result else 0,
                         "elapsed": round(result.elapsed, 2) if result else 0,

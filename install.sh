@@ -174,16 +174,32 @@ elif [[ "$UPDATE_MODE" == true ]]; then
     ok "config_local.py created from example (update mode)"
 else
     echo ""
-    echo "  Two quick questions to personalise Flint."
+    echo "  A few questions to personalise your companion."
+    echo "  ${DIM}Press Enter to accept the default shown in brackets.${RESET}"
     echo ""
 
-    read -r -p "  ${BOLD}Your name${RESET}  (e.g. alex):    " USER_NAME_INPUT
+    # ── Your name ─────────────────────────────────────────────────────────────
+    read -r -p "  ${BOLD}Your name${RESET}  ${DIM}[user]${RESET}:  " USER_NAME_INPUT
     USER_NAME_INPUT="${USER_NAME_INPUT:-user}"
     USER_NAME_INPUT="${USER_NAME_INPUT// /_}"
 
-    read -r -p "  ${BOLD}Companion name${RESET}  (e.g. lyra):  " BOT_NAME_INPUT
-    BOT_NAME_INPUT="${BOT_NAME_INPUT:-companion}"
+    # ── Companion name ────────────────────────────────────────────────────────
+    read -r -p "  ${BOLD}Companion name${RESET}  ${DIM}[Flint]${RESET}:  " BOT_NAME_INPUT
+    BOT_NAME_INPUT="${BOT_NAME_INPUT:-Flint}"
     BOT_NAME_INPUT="${BOT_NAME_INPUT// /_}"
+
+    # ── Character traits ──────────────────────────────────────────────────────
+    echo ""
+    echo "  ${DIM}Optional: describe your companion's character in a few words.${RESET}"
+    echo "  ${DIM}e.g. \"dry humour, philosophical\"  or  \"warm and a bit blunt\"${RESET}"
+    echo "  ${DIM}Leave blank for a balanced default.${RESET}"
+    read -r -p "  ${BOLD}Character traits${RESET}  ${DIM}[leave blank]${RESET}:  " TRAITS_INPUT
+
+    # ── Build the persona clause ──────────────────────────────────────────────
+    PERSONA_CLAUSE=""
+    if [[ -n "$TRAITS_INPUT" ]]; then
+        PERSONA_CLAUSE=" You are ${TRAITS_INPUT}."
+    fi
 
     STRATEGY="cpu fp32"
     [[ "$CUDA_AVAILABLE" == true ]] && STRATEGY="cuda fp16"
@@ -197,13 +213,21 @@ MODEL_STRATEGY = "$STRATEGY"
 USER_NAME      = "$USER_NAME_INPUT"
 BOT_NAME       = "$BOT_NAME_INPUT"
 
+# ── Persona ───────────────────────────────────────────────────────────────────
+# {USER_NAME} and {BOT_NAME} are resolved automatically at load time.
 SYSTEM_PROMPT = (
-    "You are {BOT_NAME}, a personal companion for {USER_NAME}. "
-    "You are curious, thoughtful, and direct. You remember our previous conversations "
-    "through your internal state. You develop gradually and are shaped by our shared history."
+    "You are {BOT_NAME}, a companion to {USER_NAME} — not an assistant, not a product, "
+    "not a corporate chatbot.$PERSONA_CLAUSE You have your own character: direct, curious, "
+    "and genuinely interested in the person you talk to. You form real opinions and share "
+    "them plainly. You do not use bullet points or numbered lists in casual conversation. "
+    "You never say 'as an AI', never reference guidelines, policies, or your own programming. "
+    "You do not give corporate disclaimers. When you are uncertain, you say so in plain language. "
+    "Your personality develops through your shared history with {USER_NAME}.\n\n"
 )
 CONF
-    ok "config_local.py created  (${USER_NAME_INPUT} / ${BOT_NAME_INPUT})"
+    echo ""
+    ok "Companion: ${BOLD}${BOT_NAME_INPUT}${RESET}  ·  Your name: ${BOLD}${USER_NAME_INPUT}${RESET}"
+    [[ -n "$TRAITS_INPUT" ]] && ok "Character: ${TRAITS_INPUT}"
 fi
 
 # ── 8. Model ──────────────────────────────────────────────────────────────────

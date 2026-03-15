@@ -70,10 +70,12 @@ class ModelRegistryService:
                 )
                 entries.append({"id": model_id, **manifest})
 
-        if not entries:
+        # Always ensure the configured MODEL_PATH has a DB record so new_session()
+        # can satisfy its FK constraint even when the file isn't downloaded yet.
+        configured_id = self._model_id_from_path(Path(config.MODEL_PATH))
+        if not any(e["id"] == configured_id for e in entries):
             dummy_path = config.MODEL_PATH
             dummy_name = Path(dummy_path).stem or "dummy"
-            model_id = self._model_id_from_path(Path(dummy_path))
             manifest = {
                 "path": dummy_path,
                 "filename": Path(dummy_path).name or "dummy",
@@ -89,7 +91,7 @@ class ModelRegistryService:
                 "supports_reasoning_mode": False,
             }
             self.db.upsert_model(
-                model_id=model_id,
+                model_id=configured_id,
                 engine_type="dummy",
                 family="rwkv",
                 name=dummy_name,
@@ -97,13 +99,13 @@ class ModelRegistryService:
                 manifest_json=json.dumps(manifest),
             )
             self.db.upsert_model_installation(
-                model_id=model_id,
+                model_id=configured_id,
                 install_path=dummy_path,
                 backend=config.MODEL_STRATEGY,
-                is_default=True,
+                is_default=not entries,
                 verification_status="unverified",
             )
-            entries.append({"id": model_id, **manifest})
+            entries.append({"id": configured_id, **manifest})
         return entries
 
     def active_model_id(self) -> str:

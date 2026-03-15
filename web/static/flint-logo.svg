@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 48" fill="none">
+  <!-- Flint — pirate parrot mascot -->
+
+  <!-- Perch -->
+  <rect x="3" y="40" width="26" height="3.5" rx="1.75" fill="#5a3c1a"/>
+
+  <!-- Tail feathers -->
+  <path d="M10 36 Q6 40 8 44 Q10 41 12 43 Q11 39 13 42 Q13 38 15 40" fill="#9a6428"/>
+
+  <!-- Body -->
+  <ellipse cx="15" cy="28" rx="8" ry="10" transform="rotate(-6 15 28)" fill="#c8873c"/>
+
+  <!-- Wing fold highlight -->
+  <path d="M9 24 Q7 29 9 35" stroke="#8a5c24" stroke-width="1.8" stroke-linecap="round"/>
+
+  <!-- Head -->
+  <circle cx="23" cy="15" r="9" fill="#c8873c"/>
+
+  <!-- Pirate tricorn hat -->
+  <path d="M16 11 Q23 6 30 11 L28 13 Q23 11.5 18 13 Z" fill="#1c1408"/>
+  <rect x="15" y="10.5" width="16" height="2.5" rx="1.25" fill="#241c0e"/>
+  <!-- Hat band accent -->
+  <rect x="15" y="12" width="16" height="1" rx="0.5" fill="#c8873c" opacity="0.35"/>
+  <!-- Tiny skull on hat -->
+  <circle cx="23" cy="9" r="1.4" fill="#c8873c" opacity="0.5"/>
+  <line x1="21.5" y1="9" x2="24.5" y2="9" stroke="#c8873c" stroke-width="0.7" opacity="0.4"/>
+
+  <!-- Upper beak -->
+  <path d="M30 13.5 Q37 15 35 20 Q32 18.5 31 16 Z" fill="#7a4e1c"/>
+  <!-- Lower beak -->
+  <path d="M31 16 Q35 20 33 22 Q30 20 30 17.5 Z" fill="#5c3a12"/>
+
+  <!-- Eye -->
+  <circle cx="25" cy="12.5" r="2.8" fill="#180e06"/>
+  <!-- Eye ring (pale, gives character) -->
+  <circle cx="25" cy="12.5" r="2" fill="#1e1208"/>
+  <!-- Eye highlight -->
+  <circle cx="26" cy="11.5" r="0.9" fill="rgba(255,235,185,0.65)"/>
+
+  <!-- Talons gripping perch -->
+  <path d="M13 40 Q11 43 13 44 M13 40 Q13 43 14 44 M13 40 Q15 42 14 44"
+        stroke="#5a3c1a" stroke-width="1.1" stroke-linecap="round"/>
+  <path d="M19 40 Q17 43 19 44 M19 40 Q19 43 20 44 M19 40 Q21 42 20 44"
+        stroke="#5a3c1a" stroke-width="1.1" stroke-linecap="round"/>
+</svg>

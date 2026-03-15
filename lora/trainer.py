@@ -153,6 +153,7 @@ class RWKVLoRATrainer:
         self.dropout = dropout
         self.max_seq_len = max_seq_len
         self._adapters: dict[str, LoRALinear] = {}
+        self._scaler = torch.cuda.amp.GradScaler() if device == "cuda" else None
 
     # ── Adapter injection ─────────────────────────────────────────────────────
 
@@ -255,7 +256,7 @@ class RWKVLoRATrainer:
         H, N = model.n_head, model.head_size
         dev = self.device
 
-        # Initialise RNN state tensors — fp32 for numerical accuracy
+        # Initialise RNN state tensors — fp32 for numerical accuracy (outside autocast)
         n_embd = model.n_embd
         n_layer = model.n_layer
         state_tmix_prev = [
@@ -273,94 +274,95 @@ class RWKVLoRATrainer:
 
         c = self._cpu_z
 
-        # Embedding lookup: index into CPU tensor, move result to device
-        x = c['emb.weight'][token_ids].to(dev)  # (T, n_embd), fp32
-        T = x.shape[0]
+        with torch.autocast(device_type="cuda", enabled=(dev == "cuda")):
+            # Embedding lookup: index into CPU tensor, move result to device
+            x = c['emb.weight'][token_ids].to(dev)  # (T, n_embd), fp32
+            T = x.shape[0]
 
-        v_first = torch.zeros_like(x)
+            v_first = torch.zeros_like(x)
 
-        for i in range(n_layer):
-            att = f'blocks.{i}.att.'
-            ffn = f'blocks.{i}.ffn.'
-            bbb = f'blocks.{i}.'
+            for i in range(n_layer):
+                att = f'blocks.{i}.att.'
+                ffn = f'blocks.{i}.ffn.'
+                bbb = f'blocks.{i}.'
 
-            # ── Time-mix (attention) ─────────────────────────────────────────
-            xx_ln = F.layer_norm(x, (n_embd,),
-                                 weight=c[bbb+'ln1.weight'].to(dev),
-                                 bias=c[bbb+'ln1.bias'].to(dev))
+                # ── Time-mix (attention) ─────────────────────────────────────────
+                xx_ln = F.layer_norm(x, (n_embd,),
+                                     weight=c[bbb+'ln1.weight'].to(dev),
+                                     bias=c[bbb+'ln1.bias'].to(dev))
 
-            sx = torch.cat((state_tmix_prev[i].unsqueeze(0), xx_ln[:-1, :]))
-            shift = sx - xx_ln
+                sx = torch.cat((state_tmix_prev[i].unsqueeze(0), xx_ln[:-1, :]))
+                shift = sx - xx_ln
 
-            xr = xx_ln + shift * c[att+'x_r'].squeeze().to(dev)
-            xw = xx_ln + shift * c[att+'x_w'].squeeze().to(dev)
-            xk = xx_ln + shift * c[att+'x_k'].squeeze().to(dev)
-            xv = xx_ln + shift * c[att+'x_v'].squeeze().to(dev)
-            xa = xx_ln + shift * c[att+'x_a'].squeeze().to(dev)
-            xg = xx_ln + shift * c[att+'x_g'].squeeze().to(dev)
+                xr = xx_ln + shift * c[att+'x_r'].squeeze().to(dev)
+                xw = xx_ln + shift * c[att+'x_w'].squeeze().to(dev)
+                xk = xx_ln + shift * c[att+'x_k'].squeeze().to(dev)
+                xv = xx_ln + shift * c[att+'x_v'].squeeze().to(dev)
+                xa = xx_ln + shift * c[att+'x_a'].squeeze().to(dev)
+                xg = xx_ln + shift * c[att+'x_g'].squeeze().to(dev)
 
-            # All 2D weight matmuls go through _mm() to keep W on CPU for backward
-            r = self._mm(xr, att+'receptance.weight')
-            w = torch.tanh(self._mm(xw, att+'w1'))
-            w = self._mm(w, att+'w2')
-            k = self._mm(xk, att+'key.weight')
-            v = self._mm(xv, att+'value.weight')
-            a = torch.sigmoid(c[att+'a0'].to(dev) + self._mm(self._mm(xa, att+'a1'), att+'a2'))
-            g = torch.sigmoid(self._mm(xg, att+'g1'))
-            g = self._mm(g, att+'g2')
+                # All 2D weight matmuls go through _mm() to keep W on CPU for backward
+                r = self._mm(xr, att+'receptance.weight')
+                w = torch.tanh(self._mm(xw, att+'w1'))
+                w = self._mm(w, att+'w2')
+                k = self._mm(xk, att+'key.weight')
+                v = self._mm(xv, att+'value.weight')
+                a = torch.sigmoid(c[att+'a0'].to(dev) + self._mm(self._mm(xa, att+'a1'), att+'a2'))
+                g = torch.sigmoid(self._mm(xg, att+'g1'))
+                g = self._mm(g, att+'g2')
 
-            k_k = c[att+'k_k'].squeeze().to(dev)
-            k_a = c[att+'k_a'].squeeze().to(dev)
-            r_k = c[att+'r_k'].to(dev)
+                k_k = c[att+'k_k'].squeeze().to(dev)
+                k_a = c[att+'k_a'].squeeze().to(dev)
+                r_k = c[att+'r_k'].to(dev)
 
-            kk = F.normalize((k * k_k).view(T, H, N), dim=-1, p=2.0).view(T, H * N)
-            k  = k * (1 + (a - 1) * k_a)
+                kk = F.normalize((k * k_k).view(T, H, N), dim=-1, p=2.0).view(T, H * N)
+                k  = k * (1 + (a - 1) * k_a)
 
-            if i == 0:
-                v_first = v
-            else:
-                v = v + (v_first - v) * torch.sigmoid(
-                    c[att+'v0'].to(dev) + self._mm(self._mm(xv, att+'v1'), att+'v2')
-                )
+                if i == 0:
+                    v_first = v
+                else:
+                    v = v + (v_first - v) * torch.sigmoid(
+                        c[att+'v0'].to(dev) + self._mm(self._mm(xv, att+'v1'), att+'v2')
+                    )
 
-            decay_w = torch.exp(-0.606531 * torch.sigmoid(c[att+'w0'].to(dev) + w))
+                decay_w = torch.exp(-0.606531 * torch.sigmoid(c[att+'w0'].to(dev) + w))
 
-            state = state_tmix_wkv[i]
-            xx_out = torch.zeros(T, H * N, dtype=torch.float32, device=dev)
-            for t in range(T):
-                r_, w_, k_, v_, kk_, a_ = r[t], decay_w[t], k[t], v[t], kk[t], a[t]
-                vk = v_.float().view(H, N, 1) @ k_.float().view(H, 1, N)
-                ab = (-kk_).float().view(H, N, 1) @ (kk_ * a_).float().view(H, 1, N)
-                s_prev = state.detach()
-                state = s_prev * w_.float().view(H, 1, N) + s_prev @ ab + vk
-                xx_out[t] = (state @ r_.float().view(H, N, 1)).view(H * N)
+                state = state_tmix_wkv[i]
+                xx_out = torch.zeros(T, H * N, dtype=torch.float32, device=dev)
+                for t in range(T):
+                    r_, w_, k_, v_, kk_, a_ = r[t], decay_w[t], k[t], v[t], kk[t], a[t]
+                    vk = v_.float().view(H, N, 1) @ k_.float().view(H, 1, N)
+                    ab = (-kk_).float().view(H, N, 1) @ (kk_ * a_).float().view(H, 1, N)
+                    s_prev = state.detach()
+                    state = s_prev * w_.float().view(H, 1, N) + s_prev @ ab + vk
+                    xx_out[t] = (state @ r_.float().view(H, N, 1)).view(H * N)
 
-            state_tmix_wkv[i] = state.detach()
-            state_tmix_prev[i] = xx_ln[-1, :].float().detach()
+                state_tmix_wkv[i] = state.detach()
+                state_tmix_prev[i] = xx_ln[-1, :].float().detach()
 
-            xx_out = F.group_norm(xx_out.view(T, H * N), num_groups=H,
-                                  weight=c[att+'ln_x.weight'].to(dev),
-                                  bias=c[att+'ln_x.bias'].to(dev),
-                                  eps=64e-5).view(T, H * N)
-            rk_term = ((r * k * r_k).view(T, H, N).sum(dim=-1, keepdim=True) * v.view(T, H, N)).view(T, H * N)
-            xx_out = xx_out + rk_term
-            att_out = self._mm(xx_out * g, att+'output.weight')
-            x = x + att_out
+                xx_out = F.group_norm(xx_out.view(T, H * N), num_groups=H,
+                                      weight=c[att+'ln_x.weight'].to(dev),
+                                      bias=c[att+'ln_x.bias'].to(dev),
+                                      eps=64e-5).view(T, H * N)
+                rk_term = ((r * k * r_k).view(T, H, N).sum(dim=-1, keepdim=True) * v.view(T, H, N)).view(T, H * N)
+                xx_out = xx_out + rk_term
+                att_out = self._mm(xx_out * g, att+'output.weight')
+                x = x + att_out
 
-            # ── Channel-mix (FFN) ────────────────────────────────────────────
-            xx_ln2 = F.layer_norm(x, (n_embd,),
-                                  weight=c[bbb+'ln2.weight'].to(dev),
-                                  bias=c[bbb+'ln2.bias'].to(dev))
+                # ── Channel-mix (FFN) ────────────────────────────────────────────
+                xx_ln2 = F.layer_norm(x, (n_embd,),
+                                      weight=c[bbb+'ln2.weight'].to(dev),
+                                      bias=c[bbb+'ln2.bias'].to(dev))
 
-            sx2 = torch.cat((state_cmix_prev[i].unsqueeze(0), xx_ln2[:-1, :]))
-            k_ffn = xx_ln2 + (sx2 - xx_ln2) * c[ffn+'x_k'].squeeze().to(dev)
-            k_ffn = torch.relu(self._mm(k_ffn, ffn+'key.weight')) ** 2
-            ffn_out = self._mm(k_ffn, ffn+'value.weight')
-            state_cmix_prev[i] = xx_ln2[-1, :].float().detach()
-            x = x + ffn_out
+                sx2 = torch.cat((state_cmix_prev[i].unsqueeze(0), xx_ln2[:-1, :]))
+                k_ffn = xx_ln2 + (sx2 - xx_ln2) * c[ffn+'x_k'].squeeze().to(dev)
+                k_ffn = torch.relu(self._mm(k_ffn, ffn+'key.weight')) ** 2
+                ffn_out = self._mm(k_ffn, ffn+'value.weight')
+                state_cmix_prev[i] = xx_ln2[-1, :].float().detach()
+                x = x + ffn_out
 
-        x = F.layer_norm(x, (n_embd,), weight=c['ln_out.weight'].to(dev), bias=c['ln_out.bias'].to(dev))
-        logits = self._mm(x, 'head.weight')
+            x = F.layer_norm(x, (n_embd,), weight=c['ln_out.weight'].to(dev), bias=c['ln_out.bias'].to(dev))
+            logits = self._mm(x, 'head.weight')
         return logits  # (T, vocab_size)
 
     # ── Loss ──────────────────────────────────────────────────────────────────
@@ -415,6 +417,8 @@ class RWKVLoRATrainer:
 
         total_loss = 0.0
         steps = 0
+        min_loss = float("inf")
+        loss_curve: List[float] = []  # sampled every N steps for DB storage
         t0 = time.time()
 
         for epoch in range(self.epochs):
@@ -422,30 +426,52 @@ class RWKVLoRATrainer:
             random.shuffle(token_seqs)
             epoch_loss = 0.0
             total_seq = len(token_seqs)
+            # Sample ~50 points across all steps for the curve
+            curve_interval = max(1, (total_seq * self.epochs) // 50)
             for step_i, ids in enumerate(token_seqs):
                 ids = ids[:self.max_seq_len]
                 optimizer.zero_grad()
                 loss = self._compute_loss(ids)
                 if loss.requires_grad:
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(params, 1.0)
-                    optimizer.step()
-                epoch_loss += loss.item()
+                    if self._scaler:
+                        self._scaler.scale(loss).backward()
+                        self._scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(params, 1.0)
+                        self._scaler.step(optimizer)
+                        self._scaler.update()
+                    else:
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(params, 1.0)
+                        optimizer.step()
+                loss_val = loss.item()
+                epoch_loss += loss_val
+                if loss_val < min_loss:
+                    min_loss = loss_val
                 steps += 1
+                if steps % curve_interval == 0:
+                    loss_curve.append(round(loss_val, 4))
                 if progress_callback:
-                    progress_callback(epoch + 1, step_i + 1, total_seq, loss.item())
+                    progress_callback(epoch + 1, step_i + 1, total_seq, loss_val)
             avg = epoch_loss / max(len(token_seqs), 1)
             log.info("Epoch %d/%d — avg loss: %.4f", epoch + 1, self.epochs, avg)
             total_loss += epoch_loss
 
         elapsed = time.time() - t0
         avg_loss = total_loss / max(steps, 1)
+        if min_loss == float("inf"):
+            min_loss = avg_loss
         log.info("Training done in %.1fs — avg loss: %.4f over %d steps", elapsed, avg_loss, steps)
 
         # Free CPU weight cache to release RAM
         self._cpu_z = {}
 
-        return {"loss": avg_loss, "steps": steps, "elapsed": elapsed}
+        return {
+            "loss": avg_loss,
+            "min_loss": min_loss,
+            "steps": steps,
+            "elapsed": elapsed,
+            "loss_curve": loss_curve,
+        }
 
     # ── Save / load adapter ───────────────────────────────────────────────────
 

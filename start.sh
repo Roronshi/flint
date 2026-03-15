@@ -67,21 +67,41 @@ fi
 
 mkdir -p "$DATA_DIR"
 
+# ── Helper: find PID owning port ─────────────────────────────────────────────
+_pid_on_port() {
+    local pid
+    pid=$(ss -tlnp "sport = :$PORT" 2>/dev/null \
+          | grep -oP 'pid=\K[0-9]+' | head -1)
+    if [[ -z "$pid" ]]; then
+        pid=$(lsof -ti "tcp:$PORT" 2>/dev/null | head -1)
+    fi
+    echo "$pid"
+}
+
 # ── Already running? ──────────────────────────────────────────────────────────
+# Check both PID file and the actual port — whichever tells the truth
+RUNNING_PID=""
 if [[ -f "$PID_FILE" ]]; then
     OLD_PID=$(cat "$PID_FILE")
     if kill -0 "$OLD_PID" 2>/dev/null; then
-        warn "Flint is already running (PID $OLD_PID)"
-        echo ""
-        echo "  ${BOLD}UI:${RESET}   ${CYAN}$URL${RESET}"
-        echo "  ${BOLD}Stop:${RESET} ${CYAN}./stop.sh${RESET}"
-        echo ""
-        _open_browser "$URL" 2>/dev/null || true
-        exit 0
+        RUNNING_PID="$OLD_PID"
     else
-        # Stale pid file
         rm -f "$PID_FILE"
     fi
+fi
+if [[ -z "$RUNNING_PID" ]]; then
+    PORT_PID=$(_pid_on_port)
+    [[ -n "$PORT_PID" ]] && RUNNING_PID="$PORT_PID"
+fi
+
+if [[ -n "$RUNNING_PID" ]]; then
+    warn "Flint is already running (PID $RUNNING_PID)"
+    echo ""
+    echo "  ${BOLD}UI:${RESET}   ${CYAN}$URL${RESET}"
+    echo "  ${BOLD}Stop:${RESET} ${CYAN}./stop.sh${RESET}"
+    echo ""
+    _open_browser "$URL" 2>/dev/null || true
+    exit 0
 fi
 
 # ── Foreground mode ───────────────────────────────────────────────────────────

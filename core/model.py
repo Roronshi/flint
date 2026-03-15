@@ -5,10 +5,18 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
 import config
+
+# Matches turn-separator artifacts that slip through without a leading newline,
+# e.g. "How are you? User:" — stripped before returning to the caller.
+_TRAILING_TURN_RE = re.compile(
+    r'\s*\b(?:User|Human|Assistant)\s*:\s*$',
+    re.IGNORECASE,
+)
 from core.model_backends import DummyBackend, ONNXBackend, RWKVBackend
 
 log = logging.getLogger(__name__)
@@ -145,6 +153,18 @@ class CompanionModel:
             top_k=top_k if top_k is not None else config.TOP_K,
             stream_callback=stream_callback,
         )
+        # Strip leading role-format artifact (RWKV G1 sometimes generates
+        # "Answer: " or "Response: " immediately after "Assistant:")
+        text = re.sub(r'^(?:Answer|Response)\s*:\s*', '', text, flags=re.IGNORECASE)
+        # Strip any trailing turn-separator the stop-sequence check missed
+        # (e.g. "How are you? User:" where no newline preceded the marker).
+        text = _TRAILING_TURN_RE.sub('', text).rstrip()
+        # Also strip the user's name if it appears as a turn marker
+        user_marker_re = re.compile(
+            r'\s*\b' + re.escape(config.USER_NAME) + r'\s*:\s*$',
+            re.IGNORECASE,
+        )
+        text = user_marker_re.sub('', text).rstrip()
         return GenerationResult(text, tokens, elapsed)
 
     def generate_stateless(
