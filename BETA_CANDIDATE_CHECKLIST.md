@@ -3,15 +3,15 @@
 This checklist defines when Flint can reasonably be called a beta candidate.
 
 ## Core product flow
-- [x] User can install Flint on Linux with `install.sh`
+- [ ] User can install Flint on Linux with `install.sh`
 - [x] User can start Flint with `start.sh`
 - [x] First-start onboarding appears when no real model is loaded
-- [x] User can upload a `.pth` or `.onnx` model from the UI
-- [x] User can import prior chat history from the UI
+- [ ] User can upload a `.pth` or `.onnx` model from the UI
+- [ ] User can import prior chat history from the UI
 - [x] User can export and import runtime state snapshots
 
 ## Model handling
-- [x] Active model can be changed from the UI
+- [ ] Active model can be changed from the UI
 - [x] Model list shows format, origin, readiness and size
 - [x] Official RWKV-7 G1 presets are recommended
 - [x] Custom models are allowed at the user's own risk
