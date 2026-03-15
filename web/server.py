@@ -395,7 +395,7 @@ def _parse_chat_transcript(text: str) -> list[dict]:
                 current_role = "user"
                 current_content = [rest]
                 continue
-            if prefix in {"assistant", "bot", "companion", "ai"}:
+            if prefix in {"assistant", "bot", "companion", "ai", "chatgpt"}:
                 flush_current()
                 current_role = "assistant"
                 current_content = [rest]

@@ -1372,6 +1372,7 @@ body::before {
 .onboarding-header {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
   gap: 16px;
   margin-bottom: 18px;
 }
@@ -1397,10 +1398,16 @@ body::before {
 .onboarding-actions { display:flex; justify-content: space-between; gap:10px; margin-top: 18px; }
 .onboarding-actions .right { display:flex; gap:8px; margin-left:auto; }
 .info-pill {
-  display:inline-flex; align-items:center; gap:6px; padding:5px 8px; margin-top:8px;
+  display:inline-flex; align-items:center; gap:6px; padding:5px 8px;
   border:1px solid var(--border); border-radius:999px; font-family: var(--font-mono); font-size:10px;
   color: var(--text-secondary); background: var(--bg-raised);
 }
+#onboarding-dummy-pill {
+  cursor: pointer; flex-shrink: 0; align-self: flex-start;
+  transition: border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+#onboarding-dummy-pill:hover { border-color: var(--accent); color: var(--accent); }
 
 </style>
 </head>
@@ -3035,6 +3042,7 @@ function showOnboarding() {
   const el = $('onboarding-overlay');
   if (el) el.classList.add('visible');
   updateOnboardingStep();
+  loadOnboardingModels();
 }
 function hideOnboarding() {
   const el = $('onboarding-overlay');
@@ -3052,24 +3060,8 @@ function updateOnboardingStep() {
   if (back) back.style.visibility = onboardingStep === 1 ? 'hidden' : 'visible';
   if (next) next.textContent = onboardingStep === 3 ? 'Start Flint' : 'Next →';
 }
-$('onboarding-back-btn')?.addEventListener('click', () => {
-  onboardingStep = Math.max(1, onboardingStep - 1);
-  updateOnboardingStep();
-});
-$('onboarding-next-btn')?.addEventListener('click', () => {
-  if (onboardingStep < 3) {
-    onboardingStep += 1;
-    updateOnboardingStep();
-  } else {
-    hideOnboarding();
-    showToast('Onboarding complete', 'success');
-  }
-});
-$('onboarding-skip-btn')?.addEventListener('click', hideOnboarding);
-$('skip-import-btn')?.addEventListener('click', () => {
-  onboardingStep = 3;
-  updateOnboardingStep();
-});
+// loadOnboardingModels and activateOnboardingModel are defined below;
+// the event listeners for overlay elements are in DOMContentLoaded (after the overlay HTML).
 
 async function uploadModelFile(file) {
   const fd = new FormData();
@@ -3092,65 +3084,142 @@ async function uploadModelFile(file) {
     showToast('Model upload failed. Flint did not change the active model.', 'error');
   }
 }
+// Sidebar model upload (sidebar is in the DOM before this script runs)
 $('upload-model-file')?.addEventListener('change', async (e) => {
   const file = e.target.files && e.target.files[0];
   if (file) await uploadModelFile(file);
   e.target.value = '';
 });
-$('onboarding-model-file')?.addEventListener('change', async (e) => {
-  const file = e.target.files && e.target.files[0];
-  if (file) await uploadModelFile(file);
-  e.target.value = '';
-});
-const dropzone = $('model-dropzone');
-if (dropzone) {
-  ['dragenter', 'dragover'].forEach(ev => dropzone.addEventListener(ev, (e) => {
-    e.preventDefault(); e.stopPropagation(); dropzone.classList.add('dragover');
-  }));
-  ['dragleave', 'drop'].forEach(ev => dropzone.addEventListener(ev, (e) => {
-    e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('dragover');
-  }));
-  dropzone.addEventListener('drop', async (e) => {
-    const file = e.dataTransfer?.files?.[0];
-    if (file) await uploadModelFile(file);
-  });
-}
-$('onboarding-import-file')?.addEventListener('change', async (e) => {
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  const fd = new FormData();
-  fd.append('file', file, file.name);
+
+async function loadOnboardingModels() {
   try {
-    const res = await fetch('/api/import_chat', { method: 'POST', body: fd });
+    const res    = await fetch('/api/models');
+    const data   = await res.json();
+    const models = (data.models || []).filter(m => m.readiness !== 'dummy');
+    const section = $('existing-models-section');
+    const list    = $('existing-models-list');
+    const divider = $('upload-or-divider');
+    if (!section || !list) return;
+    if (models.length === 0) {
+      section.style.display = 'none';
+      if (divider) divider.style.display = 'none';
+      return;
+    }
+    list.innerHTML = '';
+    models.forEach(m => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-raised)';
+      const info = document.createElement('div');
+      info.innerHTML = `<span style="font-family:var(--font-mono);font-size:11px">${m.filename}</span>`
+        + `<span style="font-family:var(--font-mono);font-size:10px;color:var(--text-dim);margin-left:8px">${m.format||'pth'} · ${m.official?'official G1':'custom'}</span>`;
+      const btn = document.createElement('button');
+      btn.className = 'action-btn';
+      btn.style.cssText = 'padding:4px 10px;font-size:10px;flex-shrink:0';
+      if (m.active) {
+        btn.textContent = '✓ Active'; btn.disabled = true; btn.style.opacity = '0.6';
+      } else {
+        btn.textContent = 'Use →';
+        btn.onclick = () => activateOnboardingModel(m.id, btn);
+      }
+      row.appendChild(info); row.appendChild(btn);
+      list.appendChild(row);
+    });
+    section.style.display = 'block';
+    if (divider) divider.style.display = 'block';
+  } catch (_) {}
+}
+
+async function activateOnboardingModel(modelId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+  try {
+    const res  = await fetch('/api/models/activate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({model_id: modelId}) });
     const data = await res.json();
     if (data.ok) {
-      showToast(`Imported ${data.messages} messages`, 'success');
-      loadHistory();
-      onboardingStep = 3;
-      updateOnboardingStep();
+      showToast('Model activated', 'success');
+      await fetchInfo();
+      loadModels();
+      loadOnboardingModels();
     } else {
-      showToast(data.message || 'Import failed', 'error');
+      showToast(data.message || 'Could not activate model', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Use →'; }
     }
   } catch (_) {
-    showToast('Import failed', 'error');
-  } finally {
-    e.target.value = '';
+    showToast('Could not activate model', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Use →'; }
   }
-});
+}
 
-
-// Collapsible sidebar sections
+// Collapsible sidebar sections (sidebar is in the DOM before this script runs)
 document.querySelectorAll('#sidebar .section-label').forEach(label => {
   label.addEventListener('click', e => {
-    // Don't collapse if user clicked a button inside the label
     if (e.target.closest('button')) return;
     const section = label.closest('.sidebar-section');
     if (section) section.classList.toggle('collapsed');
   });
 });
 
-// On load, populate models
-document.addEventListener('DOMContentLoaded', loadModels);
+// All listeners for elements inside the onboarding overlay must wait for
+// DOMContentLoaded because the overlay HTML comes after this </script> tag.
+document.addEventListener('DOMContentLoaded', () => {
+  loadModels();
+  loadOnboardingModels();
+
+  $('onboarding-back-btn')?.addEventListener('click', () => {
+    onboardingStep = Math.max(1, onboardingStep - 1);
+    updateOnboardingStep();
+  });
+  $('onboarding-next-btn')?.addEventListener('click', () => {
+    if (onboardingStep < 3) { onboardingStep += 1; updateOnboardingStep(); }
+    else { hideOnboarding(); showToast('Onboarding complete', 'success'); }
+  });
+  $('onboarding-skip-btn')?.addEventListener('click', hideOnboarding);
+  $('skip-import-btn')?.addEventListener('click', () => { onboardingStep = 3; updateOnboardingStep(); });
+
+  $('onboarding-dummy-pill')?.addEventListener('click', () => {
+    fetch('/api/models/rescan', { method: 'POST' })
+      .then(() => { loadModels(); loadOnboardingModels(); })
+      .catch(() => {});
+  });
+
+  $('onboarding-model-file')?.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) await uploadModelFile(file);
+    e.target.value = '';
+  });
+
+  $('onboarding-import-file')?.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    try {
+      const res  = await fetch('/api/import_chat', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (data.ok) {
+        showToast(`Imported ${data.messages} messages`, 'success');
+        loadHistory();
+        onboardingStep = 3; updateOnboardingStep();
+      } else {
+        showToast(data.message || 'Import failed', 'error');
+      }
+    } catch (_) { showToast('Import failed', 'error'); }
+    finally { e.target.value = ''; }
+  });
+
+  const dropzone = $('model-dropzone');
+  if (dropzone) {
+    ['dragenter', 'dragover'].forEach(ev => dropzone.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation(); dropzone.classList.add('dragover');
+    }));
+    ['dragleave', 'drop'].forEach(ev => dropzone.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('dragover');
+    }));
+    dropzone.addEventListener('drop', async (e) => {
+      const file = e.dataTransfer?.files?.[0];
+      if (file) await uploadModelFile(file);
+    });
+  }
+});
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
 waitForBackend();
@@ -3175,7 +3244,7 @@ if (parrotImg) {
         <div class="onboarding-title">Welcome to Flint</div>
         <div class="onboarding-sub">First start is simple: choose a model, optionally import your previous conversations, and confirm the safe training profile.</div>
       </div>
-      <div class="info-pill" id="onboarding-dummy-pill">dummy mode</div>
+      <button class="info-pill" id="onboarding-dummy-pill" title="Click to rescan models folder">dummy mode</button>
     </div>
     <div class="onboarding-stepbar">
       <div class="onboarding-stepchip active" id="stepchip-1">1 · model</div>
@@ -3185,6 +3254,11 @@ if (parrotImg) {
 
     <div class="onboarding-panel active" id="onboarding-step-1">
       <div class="muted-line" id="recommended-model-line">Recommended model: loading…</div>
+      <div id="existing-models-section" style="display:none;margin-bottom:14px">
+        <div class="muted-line" style="margin-bottom:8px">Models found in <code style="font-family:var(--font-mono)">models/</code> — click to activate:</div>
+        <div id="existing-models-list" style="display:flex;flex-direction:column;gap:6px"></div>
+      </div>
+      <div id="upload-or-divider" class="muted-line" style="display:none;margin-bottom:12px;text-align:center">— or upload a new model —</div>
       <div class="dropzone" id="model-dropzone">
         <div style="font-size:20px;margin-bottom:8px">⬆</div>
         <div>Drag a <strong>.pth</strong> or <strong>.onnx</strong> model here</div>
