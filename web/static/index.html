@@ -1350,6 +1350,32 @@ body::before {
 }
 
 
+/* ── System boot overlay — shown until backend ready + state resolved ──────── */
+#boot-overlay {
+  position: fixed; inset: 0;
+  background: var(--bg-deep);
+  z-index: 9000;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 14px;
+  transition: opacity 0.5s var(--ease);
+}
+#boot-overlay.hidden { opacity: 0; pointer-events: none; }
+.boot-spinner {
+  width: 28px; height: 28px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.boot-label {
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);
+}
+.boot-sub {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+}
+
 /* ── First-start onboarding ───────────────────────────────────────────────── */
 #onboarding-overlay {
   position: fixed;
@@ -1372,7 +1398,7 @@ body::before {
 .onboarding-header {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   gap: 16px;
   margin-bottom: 18px;
 }
@@ -1392,24 +1418,51 @@ body::before {
   padding: 22px;
   text-align:center;
   background: rgba(255,255,255,0.015);
+  position: relative;
 }
 .dropzone.dragover { border-color: var(--accent); background: var(--accent-glow); }
+/* Loading overlay inside dropzone — toggled by .loading class on dropzone */
+.dropzone-loading {
+  display: none;
+  position: absolute; inset: 0;
+  border-radius: 12px;
+  background: rgba(14, 11, 8, 0.85);
+  flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary);
+}
+.dropzone.loading .dropzone-loading { display: flex; }
+.dropzone.loading > *:not(.dropzone-loading) { opacity: 0.25; pointer-events: none; }
+/* Full step-1 loading veil — shown while activating an existing model */
+#model-activating-veil {
+  display: none;
+  position: absolute; inset: 0;
+  border-radius: 12px;
+  background: rgba(14, 11, 8, 0.88);
+  flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary);
+  z-index: 2;
+}
+#model-activating-veil.visible { display: flex; }
+#onboarding-step-1 { position: relative; }
 .muted-line { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); line-height: 1.7; }
 .onboarding-actions { display:flex; justify-content: space-between; gap:10px; margin-top: 18px; }
 .onboarding-actions .right { display:flex; gap:8px; margin-left:auto; }
 .info-pill {
-  display:inline-flex; align-items:center; gap:6px; padding:5px 8px;
+  display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:5px 8px;
   border:1px solid var(--border); border-radius:999px; font-family: var(--font-mono); font-size:10px;
   color: var(--text-secondary); background: var(--bg-raised);
 }
 #onboarding-dummy-pill {
-  cursor: pointer; flex-shrink: 0; align-self: flex-start;
+  cursor: pointer; flex-shrink: 0;
   white-space: nowrap;
-  padding: 6px 12px;
+  padding: 7px 14px;
   background: rgba(210, 155, 80, 0.12);
-  border-color: rgba(210, 155, 80, 0.45);
+  border: 1px solid rgba(210, 155, 80, 0.45);
+  border-radius: 999px;
   color: #d4a057;
   font-size: 11px;
+  font-family: var(--font-mono);
+  display: inline-flex; align-items: center; justify-content: center;
   transition: background 0.15s, border-color 0.15s;
 }
 #onboarding-dummy-pill:hover {
@@ -1421,6 +1474,14 @@ body::before {
 </head>
 
 <body>
+
+<!-- Boot overlay — visible until backend is ready and initial state is fetched -->
+<div id="boot-overlay">
+  <div class="boot-spinner"></div>
+  <div class="boot-label">Starting Flint…</div>
+  <div class="boot-sub" id="boot-sub">waking up</div>
+</div>
+
 <div id="app">
 
   <!-- ── Sidebar ──────────────────────────────────────────────────────────── -->
@@ -1749,6 +1810,7 @@ const state = {
   reconnectDelay:    2000,
   historyLoaded:     false,
   ambientStatus:     'present',
+  hasRealModel:      false,   // set by updateModelInfoUI once fetchInfo resolves
 };
 
 // ── DOM references ────────────────────────────────────────────────────────────
@@ -1764,30 +1826,57 @@ const searchInput  = $('search-input');
 const searchResults = $('search-results');
 
 // ── Loading screen ─────────────────────────────────────────────────────────────
-// Poll /health until the model finishes loading, then connect WebSocket
-function setBootState(on) {
+// Poll /health until the model finishes loading, then connect WebSocket.
+// Boot overlay covers the full UI so the user never sees a half-ready state.
+function setBootState(on, subText) {
+  const overlay = $('boot-overlay');
+  const sub     = $('boot-sub');
+  if (overlay) {
+    if (on) {
+      overlay.classList.remove('hidden');
+      if (sub && subText) sub.textContent = subText;
+    } else {
+      overlay.classList.add('hidden');
+      // Remove from DOM after fade so it doesn't intercept clicks
+      setTimeout(() => { if (overlay) overlay.style.display = 'none'; }, 550);
+    }
+  }
+  // Also update the empty-state fallback text
   const es = $('empty-state');
-  const sub = $('empty-sub');
-  if (!es || !sub) return;
-  if (on) {
-    es.classList.add('booting');
-    sub.textContent = 'waking up…';
-  } else {
-    es.classList.remove('booting');
-    sub.textContent = 'What\'s on your mind?';
+  const esSub = $('empty-sub');
+  if (es && esSub) {
+    if (on) { es.classList.add('booting'); esSub.textContent = 'waking up…'; }
+    else     { es.classList.remove('booting'); esSub.textContent = 'What\'s on your mind?'; }
   }
 }
 
 async function waitForBackend() {
   setStatus('offline', 'waking up…');
-  setBootState(true);
+  setBootState(true, 'waking up');
   const MAX_RETRIES = 120;   // 120 × 1.5s = 3 minutes
   let   retries     = 0;
   while (retries < MAX_RETRIES) {
     try {
       const res  = await fetch('/health');
       const data = await res.json();
-      if (data.ready) { setBootState(false); connect(); return; }
+      if (data.ready) {
+        setBootState(true, 'loading model…');
+        connect();
+        // Keep boot overlay until fetchInfo resolves so we know onboarding state
+        // before revealing the UI. fetchInfo is called from ws.onopen via connect().
+        // We wait up to 30s for the first fetchInfo to complete.
+        await new Promise(resolve => {
+          const tid = setTimeout(resolve, 30000);
+          const orig = window._onFirstInfoLoaded;
+          window._onFirstInfoLoaded = () => {
+            clearTimeout(tid);
+            if (orig) orig();
+            resolve();
+          };
+        });
+        setBootState(false);
+        return;
+      }
     } catch (_) {}
     retries++;
     await new Promise(r => setTimeout(r, 1500));
@@ -2380,13 +2469,32 @@ function updateModelInfoUI(data) {
   if ($('onboarding-training-note')) {
     $('onboarding-training-note').textContent = data.training_note || 'Using LoRA fine-tuning; advanced methods remain future-lab.';
   }
-  if ($('onboarding-dummy-pill')) {
-    $('onboarding-dummy-pill').textContent = data.needs_model_upload ? 'dummy mode' : 'model ready';
+  const pill = $('onboarding-dummy-pill');
+  if (pill) {
+    if (data.needs_model_upload) {
+      pill.textContent = 'dummy mode';
+      pill.title = 'No model loaded — click to continue anyway in dummy mode';
+    } else {
+      pill.textContent = 'model ready';
+      pill.title = 'Model is loaded';
+      pill.style.background = 'rgba(126, 184, 154, 0.12)';
+      pill.style.borderColor = 'rgba(126, 184, 154, 0.45)';
+      pill.style.color = 'var(--accent)';
+    }
   }
+  // Track whether a real model is active for the Next button gate on step 1
+  state.hasRealModel = !data.needs_model_upload && data.backend_kind !== 'dummy';
+  updateOnboardingNextBtn();
   if (data.g1_onboarding) {
     showOnboarding();
   } else {
     hideOnboarding();
+  }
+  // Signal the boot overlay that initial info has been fetched
+  if (window._onFirstInfoLoaded) {
+    const cb = window._onFirstInfoLoaded;
+    window._onFirstInfoLoaded = null;
+    cb();
   }
 }
 
@@ -3067,25 +3175,34 @@ function updateOnboardingStep() {
   const next = $('onboarding-next-btn');
   if (back) back.style.visibility = onboardingStep === 1 ? 'hidden' : 'visible';
   if (next) next.textContent = onboardingStep === 3 ? 'Start Flint' : 'Next →';
+  updateOnboardingNextBtn();
+}
+
+function updateOnboardingNextBtn() {
+  const next = $('onboarding-next-btn');
+  if (!next) return;
+  // Gate Next on step 1: must have a real model loaded
+  if (onboardingStep === 1 && !state.hasRealModel) {
+    next.disabled = true;
+    next.title = 'Load a model first — or click "dummy mode" to continue without one';
+    next.style.opacity = '0.35';
+    next.style.cursor  = 'not-allowed';
+  } else {
+    next.disabled = false;
+    next.title = '';
+    next.style.opacity = '';
+    next.style.cursor  = '';
+  }
 }
 // loadOnboardingModels and activateOnboardingModel are defined below;
 // the event listeners for overlay elements are in DOMContentLoaded (after the overlay HTML).
 
 async function uploadModelFile(file) {
-  const fd = new FormData();
+  const fd      = new FormData();
   fd.append('file', file, file.name);
-  // Show persistent loading state on the dropzone so the user knows something is happening
-  // (model activation can take 30–120 s for large models).
   const dropzone = $('model-dropzone');
-  let savedHTML = null;
-  if (dropzone) {
-    savedHTML = dropzone.innerHTML;
-    dropzone.innerHTML = '<div style="font-size:20px;margin-bottom:8px">⏳</div>'
-      + '<div>Loading model into memory…</div>'
-      + '<div class="muted-line">This can take a minute for large models — please wait</div>';
-    dropzone.style.pointerEvents = 'none';
-    dropzone.style.opacity = '0.7';
-  }
+  // Show loading overlay via CSS class — does NOT replace innerHTML so listeners survive
+  if (dropzone) dropzone.classList.add('loading');
   try {
     const res = await fetch('/api/models/upload', { method: 'POST', body: fd });
     const data = await res.json();
@@ -3098,16 +3215,12 @@ async function uploadModelFile(file) {
       onboardingStep = 2;
       updateOnboardingStep();
     } else {
-      showToast(data.message || 'Model upload failed. Flint did not change the active model.', 'error');
+      showToast(data.message || 'Model upload failed.', 'error');
     }
   } catch (_) {
-    showToast('Model upload failed. Flint did not change the active model.', 'error');
+    showToast('Model upload failed.', 'error');
   } finally {
-    if (dropzone && savedHTML !== null) {
-      dropzone.innerHTML = savedHTML;
-      dropzone.style.pointerEvents = '';
-      dropzone.style.opacity = '';
-    }
+    if (dropzone) dropzone.classList.remove('loading');
   }
 }
 // Sidebar model upload (sidebar is in the DOM before this script runs)
@@ -3157,14 +3270,19 @@ async function loadOnboardingModels() {
 
 async function activateOnboardingModel(modelId, btn) {
   if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+  const veil = $('model-activating-veil');
+  if (veil) veil.classList.add('visible');
   try {
     const res  = await fetch('/api/models/activate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({model_id: modelId}) });
     const data = await res.json();
     if (data.ok) {
-      showToast('Model activated', 'success');
+      showToast('Model ready', 'success');
       await fetchInfo();
       loadModels();
       loadOnboardingModels();
+      // Auto-advance to step 2 now that a model is loaded
+      onboardingStep = 2;
+      updateOnboardingStep();
     } else {
       showToast(data.message || 'Could not activate model', 'error');
       if (btn) { btn.disabled = false; btn.textContent = 'Use →'; }
@@ -3172,6 +3290,8 @@ async function activateOnboardingModel(modelId, btn) {
   } catch (_) {
     showToast('Could not activate model', 'error');
     if (btn) { btn.disabled = false; btn.textContent = 'Use →'; }
+  } finally {
+    if (veil) veil.classList.remove('visible');
   }
 }
 
@@ -3198,13 +3318,23 @@ document.addEventListener('DOMContentLoaded', () => {
     if (onboardingStep < 3) { onboardingStep += 1; updateOnboardingStep(); }
     else { hideOnboarding(); showToast('Onboarding complete', 'success'); }
   });
-  $('onboarding-skip-btn')?.addEventListener('click', hideOnboarding);
+  $('onboarding-skip-btn')?.addEventListener('click', () => {
+    hideOnboarding();
+    if (!state.hasRealModel) {
+      showToast('Running in dummy mode — load a model from Settings when ready', 'info');
+    }
+  });
   $('skip-import-btn')?.addEventListener('click', () => { onboardingStep = 3; updateOnboardingStep(); });
 
   $('onboarding-dummy-pill')?.addEventListener('click', () => {
-    fetch('/api/models/rescan', { method: 'POST' })
-      .then(() => { loadModels(); loadOnboardingModels(); })
-      .catch(() => {});
+    if (!state.hasRealModel) {
+      // No model loaded — treat as "continue in dummy mode"
+      hideOnboarding();
+      showToast('Running in dummy mode — load a model from Settings to enable full features', 'info');
+    } else {
+      // Model is ready — pill is just an indicator, click does nothing extra
+      showToast('Model is loaded and ready', 'success');
+    }
   });
 
   $('onboarding-model-file')?.addEventListener('change', async (e) => {
@@ -3276,7 +3406,7 @@ if (parrotImg) {
         <div class="onboarding-title">Welcome to Flint</div>
         <div class="onboarding-sub">First start is simple: choose a model, optionally import your previous conversations, and confirm the safe training profile.</div>
       </div>
-      <button class="info-pill" id="onboarding-dummy-pill" title="Click to rescan models folder">dummy mode</button>
+      <button class="info-pill" id="onboarding-dummy-pill" title="No model loaded — click to continue in dummy mode">dummy mode</button>
     </div>
     <div class="onboarding-stepbar">
       <div class="onboarding-stepchip active" id="stepchip-1">1 · model</div>
@@ -3285,6 +3415,12 @@ if (parrotImg) {
     </div>
 
     <div class="onboarding-panel active" id="onboarding-step-1">
+      <!-- Activation veil — covers step 1 while server loads model into VRAM -->
+      <div id="model-activating-veil">
+        <div class="boot-spinner"></div>
+        <div>Loading model into memory…</div>
+        <div style="color:var(--text-dim)">this may take 30–120 seconds for large models</div>
+      </div>
       <div class="muted-line" id="recommended-model-line">Recommended model: loading…</div>
       <div id="existing-models-section" style="display:none;margin-bottom:14px">
         <div class="muted-line" style="margin-bottom:8px">Models found in <code style="font-family:var(--font-mono)">models/</code> — click to activate:</div>
@@ -3292,12 +3428,18 @@ if (parrotImg) {
       </div>
       <div id="upload-or-divider" class="muted-line" style="display:none;margin-bottom:12px;text-align:center">— or upload a new model —</div>
       <div class="dropzone" id="model-dropzone">
+        <!-- Loading overlay — shown via .loading class on parent dropzone -->
+        <div class="dropzone-loading">
+          <div class="boot-spinner"></div>
+          <div>Uploading model…</div>
+          <div style="color:var(--text-dim)">this can take a minute for large files</div>
+        </div>
         <div style="font-size:20px;margin-bottom:8px">⬆</div>
         <div>Drag a <strong>.pth</strong> or <strong>.onnx</strong> model here</div>
         <div class="muted-line">or use the file picker below</div>
         <div style="margin-top:12px">
           <label class="action-btn">
-            <span class="btn-icon">↑</span> Choose model
+            <span class="btn-icon">↑</span> Upload model file
             <input type="file" id="onboarding-model-file" accept=".pth,.onnx" style="display:none" />
           </label>
         </div>
@@ -3331,7 +3473,7 @@ if (parrotImg) {
     <div class="onboarding-actions">
       <button class="action-btn" id="onboarding-back-btn">← Back</button>
       <div class="right">
-        <button class="action-btn" id="onboarding-skip-btn">Hide</button>
+        <button class="action-btn" id="onboarding-skip-btn">Use dummy mode</button>
         <button class="action-btn" id="onboarding-next-btn">Next →</button>
       </div>
     </div>
