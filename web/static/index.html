@@ -3231,41 +3231,67 @@ $('upload-model-file')?.addEventListener('change', async (e) => {
 });
 
 async function loadOnboardingModels() {
+  const section = $('existing-models-section');
+  const list    = $('existing-models-list');
+  const divider = $('upload-or-divider');
+  const header  = $('existing-models-header');
+  if (!section || !list) return;
+
+  // Show scanning placeholder
+  section.style.display = 'block';
+  list.innerHTML = '<div style="font-family:var(--font-mono);font-size:11px;color:var(--text-dim);padding:6px 0">Scanning models folder…</div>';
+
   try {
     const res    = await fetch('/api/models');
     const data   = await res.json();
+    // Show all models with real files on disk (readiness "ready"); hide dummy placeholder
     const models = (data.models || []).filter(m => m.readiness !== 'dummy');
-    const section = $('existing-models-section');
-    const list    = $('existing-models-list');
-    const divider = $('upload-or-divider');
-    if (!section || !list) return;
+
     if (models.length === 0) {
       section.style.display = 'none';
       if (divider) divider.style.display = 'none';
       return;
     }
+
+    if (header) header.textContent = `${models.length} model${models.length > 1 ? 's' : ''} found in models/`;
     list.innerHTML = '';
     models.forEach(m => {
       const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-raised)';
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg-raised)';
+
       const info = document.createElement('div');
-      info.innerHTML = `<span style="font-family:var(--font-mono);font-size:11px">${m.filename}</span>`
-        + `<span style="font-family:var(--font-mono);font-size:10px;color:var(--text-dim);margin-left:8px">${m.format||'pth'} · ${m.official?'official G1':'custom'}</span>`;
+      info.style.cssText = 'min-width:0;flex:1';
+      const sizeMB = m.size_mb ? (m.size_mb > 1000 ? `${(m.size_mb/1024).toFixed(1)} GB` : `${m.size_mb} MB`) : '';
+      info.innerHTML =
+        `<div style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.filename}</div>`
+        + `<div style="font-family:var(--font-mono);font-size:10px;color:var(--text-dim);margin-top:2px">${[m.format||'pth', m.official?'official G1':'custom', sizeMB].filter(Boolean).join(' · ')}</div>`;
+
       const btn = document.createElement('button');
       btn.className = 'action-btn';
-      btn.style.cssText = 'padding:4px 10px;font-size:10px;flex-shrink:0';
-      if (m.active) {
-        btn.textContent = '✓ Active'; btn.disabled = true; btn.style.opacity = '0.6';
+      btn.style.cssText = 'padding:5px 12px;font-size:11px;flex-shrink:0';
+
+      // A model may be "active" in config but not yet loaded into memory (backend still dummy).
+      // In that case, show "Load →" so the user can trigger loading.
+      const loadedAndReady = m.active && state.hasRealModel;
+      if (loadedAndReady) {
+        btn.textContent = '✓ Loaded';
+        btn.disabled = true;
+        btn.style.cssText += ';opacity:0.55;cursor:default';
       } else {
-        btn.textContent = 'Use →';
+        btn.textContent = m.active ? 'Load →' : 'Use →';
         btn.onclick = () => activateOnboardingModel(m.id, btn);
       }
-      row.appendChild(info); row.appendChild(btn);
+
+      row.appendChild(info);
+      row.appendChild(btn);
       list.appendChild(row);
     });
+
     section.style.display = 'block';
     if (divider) divider.style.display = 'block';
-  } catch (_) {}
+  } catch (_) {
+    list.innerHTML = '<div style="font-family:var(--font-mono);font-size:11px;color:var(--text-dim);padding:6px 0">Could not scan models folder.</div>';
+  }
 }
 
 async function activateOnboardingModel(modelId, btn) {
@@ -3336,6 +3362,8 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast('Model is loaded and ready', 'success');
     }
   });
+
+  $('rescan-models-btn')?.addEventListener('click', () => loadOnboardingModels());
 
   $('onboarding-model-file')?.addEventListener('change', async (e) => {
     const file = e.target.files && e.target.files[0];
@@ -3422,11 +3450,14 @@ if (parrotImg) {
         <div style="color:var(--text-dim)">this may take 30–120 seconds for large models</div>
       </div>
       <div class="muted-line" id="recommended-model-line">Recommended model: loading…</div>
-      <div id="existing-models-section" style="display:none;margin-bottom:14px">
-        <div class="muted-line" style="margin-bottom:8px">Models found in <code style="font-family:var(--font-mono)">models/</code> — click to activate:</div>
+      <div id="existing-models-section" style="margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <span id="existing-models-header" style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)">Scanning models folder…</span>
+          <button id="rescan-models-btn" style="font-family:var(--font-mono);font-size:10px;color:var(--text-dim);background:none;border:none;cursor:pointer;padding:0;text-decoration:underline" title="Re-scan the models/ folder">rescan</button>
+        </div>
         <div id="existing-models-list" style="display:flex;flex-direction:column;gap:6px"></div>
       </div>
-      <div id="upload-or-divider" class="muted-line" style="display:none;margin-bottom:12px;text-align:center">— or upload a new model —</div>
+      <div id="upload-or-divider" class="muted-line" style="display:none;margin-bottom:12px;text-align:center">— or upload a new file —</div>
       <div class="dropzone" id="model-dropzone">
         <!-- Loading overlay — shown via .loading class on parent dropzone -->
         <div class="dropzone-loading">
