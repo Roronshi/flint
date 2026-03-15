@@ -1404,10 +1404,18 @@ body::before {
 }
 #onboarding-dummy-pill {
   cursor: pointer; flex-shrink: 0; align-self: flex-start;
-  transition: border-color 0.15s, color 0.15s;
   white-space: nowrap;
+  padding: 6px 12px;
+  background: rgba(210, 155, 80, 0.12);
+  border-color: rgba(210, 155, 80, 0.45);
+  color: #d4a057;
+  font-size: 11px;
+  transition: background 0.15s, border-color 0.15s;
 }
-#onboarding-dummy-pill:hover { border-color: var(--accent); color: var(--accent); }
+#onboarding-dummy-pill:hover {
+  background: rgba(210, 155, 80, 0.22);
+  border-color: rgba(210, 155, 80, 0.7);
+}
 
 </style>
 </head>
@@ -3066,15 +3074,27 @@ function updateOnboardingStep() {
 async function uploadModelFile(file) {
   const fd = new FormData();
   fd.append('file', file, file.name);
+  // Show persistent loading state on the dropzone so the user knows something is happening
+  // (model activation can take 30–120 s for large models).
+  const dropzone = $('model-dropzone');
+  let savedHTML = null;
+  if (dropzone) {
+    savedHTML = dropzone.innerHTML;
+    dropzone.innerHTML = '<div style="font-size:20px;margin-bottom:8px">⏳</div>'
+      + '<div>Loading model into memory…</div>'
+      + '<div class="muted-line">This can take a minute for large models — please wait</div>';
+    dropzone.style.pointerEvents = 'none';
+    dropzone.style.opacity = '0.7';
+  }
   try {
-    showToast('Uploading model…', 'info');
     const res = await fetch('/api/models/upload', { method: 'POST', body: fd });
     const data = await res.json();
     if (data.ok) {
-      showToast('Model uploaded', 'success');
+      showToast('Model ready', 'success');
       await loadModels();
       await fetchInfo();
       await fetchStatus();
+      loadOnboardingModels();
       onboardingStep = 2;
       updateOnboardingStep();
     } else {
@@ -3082,6 +3102,12 @@ async function uploadModelFile(file) {
     }
   } catch (_) {
     showToast('Model upload failed. Flint did not change the active model.', 'error');
+  } finally {
+    if (dropzone && savedHTML !== null) {
+      dropzone.innerHTML = savedHTML;
+      dropzone.style.pointerEvents = '';
+      dropzone.style.opacity = '';
+    }
   }
 }
 // Sidebar model upload (sidebar is in the DOM before this script runs)
@@ -3205,6 +3231,12 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (_) { showToast('Import failed', 'error'); }
     finally { e.target.value = ''; }
   });
+
+  // Allow drops anywhere on the page — without this the overlay backdrop signals
+  // "no drop allowed" to the browser and the cursor shows a ✗ before the user
+  // reaches the dropzone.
+  document.addEventListener('dragover', e => e.preventDefault());
+  document.addEventListener('drop', e => e.preventDefault()); // prevent browser opening file if dropped outside dropzone
 
   const dropzone = $('model-dropzone');
   if (dropzone) {
