@@ -112,19 +112,8 @@ _kill_and_wait() {
 }
 
 if [[ -n "$RUNNING_PID" ]]; then
-    if [[ "$RESTART" == true ]]; then
-        info "Restarting Flint (stopping PID $RUNNING_PID)…"
-        _kill_and_wait "$RUNNING_PID"
-    else
-        warn "Flint is already running (PID $RUNNING_PID)"
-        info "Use './start.sh --restart' to stop it and start fresh."
-        echo ""
-        echo "  ${BOLD}UI:${RESET}   ${CYAN}$URL${RESET}"
-        echo "  ${BOLD}Stop:${RESET} ${CYAN}./stop.sh${RESET}"
-        echo ""
-        _open_browser "$URL" 2>/dev/null || true
-        exit 0
-    fi
+    info "Stopping previous Flint process (PID $RUNNING_PID)…"
+    _kill_and_wait "$RUNNING_PID"
 fi
 
 # ── Foreground mode ───────────────────────────────────────────────────────────
