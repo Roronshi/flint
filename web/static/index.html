@@ -1369,6 +1369,11 @@ body::before {
   animation: spin 0.9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.boot-logo {
+  width: 64px; height: 64px;
+  opacity: 0.9;
+  margin-bottom: 6px;
+}
 .boot-label {
   font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);
 }
@@ -1477,6 +1482,7 @@ body::before {
 
 <!-- Boot overlay — visible until backend is ready and initial state is fetched -->
 <div id="boot-overlay">
+  <img src="/static/flint-logo.svg" alt="Flint" class="boot-logo">
   <div class="boot-spinner"></div>
   <div class="boot-label">Starting Flint…</div>
   <div class="boot-sub" id="boot-sub">waking up</div>
