@@ -13,6 +13,7 @@ PID_FILE="$DATA_DIR/flint.pid"
 LOG_FILE="$DATA_DIR/flint.log"
 PORT=8000
 FOREGROUND=false
+RESTART=false
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 RESET=$'\033[0m'; BOLD=$'\033[1m'; DIM=$'\033[2m'
@@ -40,6 +41,7 @@ _open_browser() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --fg|--foreground) FOREGROUND=true ;;
+        --restart)         RESTART=true ;;
         --port) PORT="${2:-8000}"; shift ;;
         --port=*) PORT="${1#*=}" ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -94,14 +96,35 @@ if [[ -z "$RUNNING_PID" ]]; then
     [[ -n "$PORT_PID" ]] && RUNNING_PID="$PORT_PID"
 fi
 
+_kill_and_wait() {
+    local pid="$1"
+    info "Stopping old process (PID $pid)…"
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+        sleep 1
+    fi
+    rm -f "$PID_FILE"
+}
+
 if [[ -n "$RUNNING_PID" ]]; then
-    warn "Flint is already running (PID $RUNNING_PID)"
-    echo ""
-    echo "  ${BOLD}UI:${RESET}   ${CYAN}$URL${RESET}"
-    echo "  ${BOLD}Stop:${RESET} ${CYAN}./stop.sh${RESET}"
-    echo ""
-    _open_browser "$URL" 2>/dev/null || true
-    exit 0
+    if [[ "$RESTART" == true ]]; then
+        info "Restarting Flint (stopping PID $RUNNING_PID)…"
+        _kill_and_wait "$RUNNING_PID"
+    else
+        warn "Flint is already running (PID $RUNNING_PID)"
+        info "Use './start.sh --restart' to stop it and start fresh."
+        echo ""
+        echo "  ${BOLD}UI:${RESET}   ${CYAN}$URL${RESET}"
+        echo "  ${BOLD}Stop:${RESET} ${CYAN}./stop.sh${RESET}"
+        echo ""
+        _open_browser "$URL" 2>/dev/null || true
+        exit 0
+    fi
 fi
 
 # ── Foreground mode ───────────────────────────────────────────────────────────
