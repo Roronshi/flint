@@ -8,10 +8,6 @@
 import json
 import logging
 import argparse
-import sqlite3
-import uuid
-from collections import deque
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,24 +20,6 @@ from core.session import ConversationDB
 log = logging.getLogger(__name__)
 
 
-# ── Shared DB context ──────────────────────────────────────────────────────────
-
-@contextmanager
-def _raw_conn(db_path: str):
-    """
-    Bare sqlite3 connection used by import_to_db.
-    Uses the same WAL + foreign_keys settings as ConversationDB._conn(),
-    and guarantees the connection is always closed.
-    """
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
 # ── ChatGPT ────────────────────────────────────────────────────────────────────
 
 def parse_chatgpt(filepath: str) -> list:
@@ -51,7 +29,10 @@ def parse_chatgpt(filepath: str) -> list:
     """
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
+    return _parse_chatgpt_from_data(data)
 
+
+def _parse_chatgpt_from_data(data) -> list:
     if not isinstance(data, list):
         log.warning("Unexpected ChatGPT export structure — expected a list.")
         return []
@@ -63,58 +44,61 @@ def parse_chatgpt(filepath: str) -> list:
             continue
         messages = _walk_chatgpt_tree(mapping, convo.get("current_node"))
         if len(messages) >= 2:
+            # Use the export's own conversation ID for stable deduplication.
+            export_id = convo.get("id") or convo.get("conversation_id") or ""
             sessions.append({
-                "id":         str(uuid.uuid4())[:8],
+                "id":         export_id,
                 "source":     "chatgpt",
                 "started_at": messages[0]["timestamp"],
                 "messages":   messages,
             })
 
-    log.info(f"ChatGPT: {len(sessions)} conversations parsed.")
+    log.info("ChatGPT: %d conversations parsed.", len(sessions))
     return sessions
 
 
-def _walk_chatgpt_tree(mapping: dict, start_node: str) -> list:
+def _walk_chatgpt_tree(mapping: dict, current_node: str) -> list:
     """
-    BFS walk of the ChatGPT message tree. Returns messages in conversation order.
-    Uses deque (not recursion) — safe for deeply branched exports.
+    Reconstruct the linear conversation along the active branch by walking
+    from current_node UP through parent pointers to the root, then reversing.
+    This is the correct traversal for ChatGPT's tree-structured message mapping.
     """
-    if not start_node:
+    if not current_node:
         return []
 
-    messages = []
-    visited  = set()
-    queue    = deque([start_node])
-
-    while queue:
-        node_id = queue.popleft()
-        if not node_id or node_id in visited or node_id not in mapping:
-            continue
+    # Walk from leaf to root via parent pointers.
+    path = []
+    node_id = current_node
+    visited = set()
+    while node_id and node_id not in visited and node_id in mapping:
         visited.add(node_id)
+        path.append(node_id)
+        node_id = mapping[node_id].get("parent")
 
+    path.reverse()  # root → leaf order
+
+    messages = []
+    for node_id in path:
         node = mapping[node_id]
         msg  = node.get("message")
-
-        if msg and msg.get("content"):
-            parts   = msg["content"].get("parts", [])
-            content = " ".join(p for p in parts if isinstance(p, str)).strip()
-            role    = msg.get("author", {}).get("role", "")
-
-            if content and role in ("user", "assistant"):
-                ct = msg.get("create_time")
-                ts = (
-                    datetime.fromtimestamp(ct, tz=timezone.utc).isoformat()
-                    if ct
-                    else datetime.now(tz=timezone.utc).isoformat()
-                )
-                messages.append({
-                    "role":      "user" if role == "user" else "bot",
-                    "content":   content,
-                    "timestamp": ts,
-                })
-
-        for child in node.get("children", []):
-            queue.append(child)
+        if not msg or not msg.get("content"):
+            continue
+        parts   = msg["content"].get("parts", [])
+        content = " ".join(p for p in parts if isinstance(p, str)).strip()
+        role    = msg.get("author", {}).get("role", "")
+        if not content or role not in ("user", "assistant"):
+            continue
+        ct = msg.get("create_time")
+        ts = (
+            datetime.fromtimestamp(ct, tz=timezone.utc).isoformat()
+            if ct
+            else datetime.now(tz=timezone.utc).isoformat()
+        )
+        messages.append({
+            "role":      "user" if role == "user" else "assistant",
+            "content":   content,
+            "timestamp": ts,
+        })
 
     return messages
 
@@ -124,11 +108,13 @@ def _walk_chatgpt_tree(mapping: dict, start_node: str) -> list:
 def parse_claude(filepath: str) -> list:
     """
     Parse Claude.ai conversations.json export.
-    Handles the standard Claude export format and our own normalized format.
     """
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
+    return _parse_claude_from_data(data)
 
+
+def _parse_claude_from_data(data) -> list:
     if isinstance(data, list):
         conversations = data
     elif isinstance(data, dict) and "conversations" in data:
@@ -145,7 +131,6 @@ def parse_claude(filepath: str) -> list:
             role    = msg.get("role", msg.get("sender", ""))
             content = msg.get("content", "")
 
-            # Claude exports content as a list of typed content blocks
             if isinstance(content, list):
                 content = " ".join(
                     block.get("text", "")
@@ -156,88 +141,106 @@ def parse_claude(filepath: str) -> list:
 
             if content and role in ("human", "user", "assistant"):
                 messages.append({
-                    "role":      "user" if role in ("human", "user") else "bot",
+                    "role":      "user" if role in ("human", "user") else "assistant",
                     "content":   content,
                     "timestamp": msg.get("created_at", datetime.now().isoformat()),
                 })
 
         if len(messages) >= 2:
+            export_id = convo.get("uuid") or convo.get("id") or ""
             sessions.append({
-                "id":         str(uuid.uuid4())[:8],
+                "id":         export_id,
                 "source":     "claude",
                 "started_at": messages[0]["timestamp"],
                 "messages":   messages,
             })
 
-    log.info(f"Claude: {len(sessions)} conversations parsed.")
+    log.info("Claude: %d conversations parsed.", len(sessions))
     return sessions
 
 
 # ── Database import ────────────────────────────────────────────────────────────
 
-def import_to_db(sessions: list, db: ConversationDB) -> tuple[int, int]:
+def import_to_db(
+    sessions: list,
+    db: ConversationDB,
+    companion_id: str | None = None,
+    model_id: str | None = None,
+) -> tuple[int, int]:
     """
-    Import normalized sessions into SQLite.
-    Each session is its own transaction — a crash won't leave partial imports.
-    Sessions already present in the DB are skipped (idempotent).
+    Import normalized sessions into SQLite using ConversationDB methods so
+    every session is properly bound to the companion and visible to LoRA
+    training, reflection, and search.
+
+    Idempotent: uses the export's own session ID stored in import_batch_id
+    to skip sessions that have already been imported for this companion.
+
     Returns (imported_count, skipped_count).
-    Prints progress every 50 sessions for large imports.
     """
+    companion_id = companion_id or db.get_or_create_default_companion()
+
+    if model_id is None:
+        with db._conn() as conn:
+            row = conn.execute(
+                "SELECT model_id FROM model_installations WHERE is_default = 1 LIMIT 1"
+            ).fetchone()
+            model_id = row["model_id"] if row else None
+
     imported = 0
     skipped  = 0
 
-    with _raw_conn(db.db_path) as conn:
-        for i, session in enumerate(sessions):
-            # Progress for large imports
-            if i > 0 and i % 50 == 0:
-                print(f"  Progress: {i}/{len(sessions)} sessions processed "
-                      f"({imported} imported, {skipped} skipped)...")
+    for i, session in enumerate(sessions):
+        if i > 0 and i % 50 == 0:
+            print(f"  Progress: {i}/{len(sessions)} sessions "
+                  f"({imported} imported, {skipped} skipped)...")
 
-            if conn.execute(
-                "SELECT id FROM sessions WHERE id = ?", (session["id"],)
-            ).fetchone():
-                skipped += 1
-                continue
+        export_id = session.get("id") or ""
 
-            try:
-                with conn:  # per-session transaction
+        # Idempotency: skip if this export session was already imported.
+        if export_id:
+            with db._conn() as conn:
+                if conn.execute(
+                    "SELECT id FROM sessions WHERE import_batch_id = ? AND companion_id = ?",
+                    (export_id, companion_id),
+                ).fetchone():
+                    skipped += 1
+                    continue
+
+        try:
+            session_id = db.new_session(companion_id=companion_id, model_id=model_id)
+
+            # Backfill the export metadata that new_session() doesn't set.
+            with db._conn() as conn:
+                conn.execute(
+                    "UPDATE sessions SET source = ?, import_batch_id = ?, started_at = ? WHERE id = ?",
+                    ("import", export_id or None, session["started_at"], session_id),
+                )
+
+            for msg in session["messages"]:
+                role = msg["role"]
+                message_id = db.add_message(
+                    session_id=session_id,
+                    role=role,
+                    content=msg["content"],
+                    companion_id=companion_id,
+                    model_id=model_id,
+                    timestamp=msg.get("timestamp"),
+                )
+                # Mark as imported so the UI can distinguish these messages.
+                with db._conn() as conn:
                     conn.execute(
-                        """INSERT INTO sessions
-                           (id, started_at, ended_at, turn_count, lora_version)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        (
-                            session["id"],
-                            session["started_at"],
-                            session["started_at"],
-                            len(session["messages"]),
-                            "imported",
-                        )
+                        "UPDATE messages SET imported = 1 WHERE id = ?",
+                        (message_id,),
                     )
-                    for msg in session["messages"]:
-                        cursor = conn.execute(
-                            """INSERT INTO messages
-                               (session_id, role, content, timestamp)
-                               VALUES (?, ?, ?, ?)""",
-                            (
-                                session["id"],
-                                msg["role"],
-                                msg["content"],
-                                msg["timestamp"],
-                            )
-                        )
-                        message_id = cursor.lastrowid
-                        conn.execute(
-                            """INSERT INTO messages_fts
-                               (message_id, session_id, role, content)
-                               VALUES (?, ?, ?, ?)""",
-                            (message_id, session["id"], msg["role"], msg["content"])
-                        )
-                imported += 1
-            except Exception as e:
-                log.warning(f"Skipping session {session['id']}: {e}")
-                skipped += 1
 
-    log.info(f"Import complete: {imported} imported, {skipped} skipped.")
+            db.end_session(session_id, lora_version="imported")
+            imported += 1
+
+        except Exception as exc:
+            log.warning("Skipping session %s: %s", export_id or i, exc)
+            skipped += 1
+
+    log.info("Import complete: %d imported, %d skipped.", imported, skipped)
     return imported, skipped
 
 
@@ -245,23 +248,23 @@ def import_to_db(sessions: list, db: ConversationDB) -> tuple[int, int]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Import conversation history into RWKV Companion"
+        description="Import conversation history into Flint"
     )
     parser.add_argument(
         "--source",
         choices=["chatgpt", "claude"],
         required=True,
-        help="Format of the export file"
+        help="Format of the export file",
     )
     parser.add_argument(
         "--file",
         required=True,
-        help="Path to the export JSON file"
+        help="Path to the export JSON file",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Parse and preview without writing to the database"
+        help="Parse and preview without writing to the database",
     )
     args = parser.parse_args()
 

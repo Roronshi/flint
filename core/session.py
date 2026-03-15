@@ -700,8 +700,9 @@ class ConversationDB:
         companion_id: Optional[str] = None,
         model_id: Optional[str] = None,
         turn_index: Optional[int] = None,
+        timestamp: Optional[str] = None,
     ) -> int:
-        ts = datetime.now().isoformat()
+        ts = timestamp or datetime.now().isoformat()
         with self._conn() as conn:
             cursor = conn.execute(
                 """

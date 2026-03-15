@@ -40,6 +40,7 @@ from services.scheduler_service import SchedulerService
 from services.state_service import StateService
 from services.dream_service import DreamService
 from services.idle_reasoning import IdleReasoningService
+from tools.parser import _parse_chatgpt_from_data, _parse_claude_from_data, import_to_db as _structured_import
 from services.model_presets import G1_PRESETS, recommend_preset
 from services.training_presets import TRAINING_PRESETS, default_training_preset
 
@@ -971,12 +972,47 @@ async def import_chat(file: UploadFile = File(...)):
             content={"ok": False, "message": f"File too large (max {config.MAX_UPLOAD_CHAT_BYTES // 1024 // 1024} MB)"},
         )
     text = content.decode("utf-8", errors="ignore")
+
+    # Try structured ChatGPT / Claude formats first (multi-session import).
+    structured_sessions = None
+    if file.filename and file.filename.lower().endswith(".json"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, list) and data and "mapping" in data[0]:
+                structured_sessions = _parse_chatgpt_from_data(data)
+            else:
+                structured_sessions = _parse_claude_from_data(data)
+            if not structured_sessions:
+                structured_sessions = None
+        except Exception:
+            structured_sessions = None
+
+    if structured_sessions is not None:
+        # Multi-session structured import — companion-bound via import_to_db.
+        imported, skipped = _structured_import(
+            structured_sessions, state.db,
+            companion_id=state.companion_id,
+            model_id=state.active_model_id,
+        )
+        total_msgs = sum(len(s["messages"]) for s in structured_sessions)
+        try:
+            reflection_service.ingest_conversation_blocks(state.companion_id, state.active_model_id)
+            reflection_service.summarize_recent_blocks(state.companion_id, state.active_model_id)
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "session_id": None,
+            "sessions": imported,
+            "messages": total_msgs,
+            "skipped": skipped,
+        }
+
+    # Fallback: plain text or simple JSON transcript — single session.
     messages = _parse_chat_transcript(text)
     if not messages:
         return {"ok": False, "message": "No messages detected in file"}
-    # Create a new import session
     session_id = state.db.new_session(state.companion_id, state.active_model_id)
-    # Mark session as import source
     try:
         with state.db._conn() as conn:
             conn.execute(
@@ -985,8 +1021,7 @@ async def import_chat(file: UploadFile = File(...)):
             )
     except Exception:
         pass
-    # Insert messages
-    for idx, msg in enumerate(messages):
+    for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
         try:
@@ -996,9 +1031,7 @@ async def import_chat(file: UploadFile = File(...)):
                 content=content,
                 companion_id=state.companion_id,
                 model_id=state.active_model_id,
-                turn_index=None,
             )
-            # Mark as imported
             with state.db._conn() as conn:
                 conn.execute("UPDATE messages SET imported = 1 WHERE id = ?", (message_id,))
         except Exception:
@@ -1007,14 +1040,12 @@ async def import_chat(file: UploadFile = File(...)):
         state.db.end_session(session_id, lora_version="imported")
     except Exception:
         pass
-    # After import, ingest and summarize conversation blocks so that
-    # reflections/idle reasoning can operate on this data soon
     try:
         reflection_service.ingest_conversation_blocks(state.companion_id, state.active_model_id)
         reflection_service.summarize_recent_blocks(state.companion_id, state.active_model_id)
     except Exception:
         pass
-    return {"ok": True, "session_id": session_id, "messages": len(messages)}
+    return {"ok": True, "session_id": session_id, "sessions": 1, "messages": len(messages)}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
